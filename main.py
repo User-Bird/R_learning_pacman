@@ -1,100 +1,111 @@
 """
-main.py  ─  Phase 1: window layout + dummy test
+main.py  ─  Phase 3: 6 Live RandomAgent Games
 ─────────────────────────────────────────────────
-Confirmation test: 6 moving yellow dots across sub-surfaces,
-right scrollable stats panel, bottom updates-per-frame slider.
-Close window (X or ESC) kills everything cleanly.
+Runs 6 independent TankGame instances.
+Each game is driven by 2 RandomAgents.
 """
 
 import pygame
 import sys
 import math
 
-# ── Layout ────────────────────────────────────────────────────────────────────
-SW, SH     = 1920, 1080        # target resolution
-PANEL_W    = 400               # right stats panel
-BOTTOM_H   = 72                # bottom slider bar
-GAP        = 3                 # px gap between cells
-COLS, ROWS = 3, 2
-NUM_GAMES  = COLS * ROWS
+from game import TankGame
+from agent import RandomAgent
+from renderer import draw_game
 
-GAME_AREA_W = SW - PANEL_W                            # 1520
-GAME_AREA_H = SH - BOTTOM_H                          # 1008
-CELL_W = (GAME_AREA_W - GAP * (COLS + 1)) // COLS    # 502
-CELL_H = (GAME_AREA_H - GAP * (ROWS + 1)) // ROWS    # 501
+# ── Layout ────────────────────────────────────────────────────────────────────
+SW, SH = 1920, 1080  # target resolution
+PANEL_W = 400  # right stats panel
+BOTTOM_H = 72  # bottom slider bar
+GAP = 3  # px gap between cells
+COLS, ROWS = 3, 2
+NUM_GAMES = COLS * ROWS
+
+GAME_AREA_W = SW - PANEL_W
+GAME_AREA_H = SH - BOTTOM_H
+CELL_W = (GAME_AREA_W - GAP * (COLS + 1)) // COLS  # ~502
+CELL_H = (GAME_AREA_H - GAP * (ROWS + 1)) // ROWS  # ~501
+TILE_SIZE = 20  # 25 cols * 20 = 500px width
 
 
 def cell_origin(idx: int) -> tuple[int, int]:
-    """Top-left pixel of sub-surface idx on the main screen."""
     col = idx % COLS
     row = idx // COLS
-    x   = GAP + col * (CELL_W + GAP)
-    y   = GAP + row * (CELL_H + GAP)
+    x = GAP + col * (CELL_W + GAP)
+    y = GAP + row * (CELL_H + GAP)
     return x, y
 
 
 # ── Palette ───────────────────────────────────────────────────────────────────
-C_BG          = ( 12,  12,  16)
-C_CELL_BG     = ( 20,  20,  26)
-C_PANEL_BG    = ( 16,  16,  22)
-C_PANEL_LINE  = ( 40,  40,  55)
-C_BORDER      = ( 42,  42,  56)
-C_SLIDER_RAIL = ( 35,  35,  48)
-C_SLIDER_FILL = ( 72, 196, 138)
+C_BG = (12, 12, 16)
+C_CELL_BG = (20, 20, 26)
+C_PANEL_BG = (16, 16, 22)
+C_PANEL_LINE = (40, 40, 55)
+C_SLIDER_RAIL = (35, 35, 48)
+C_SLIDER_FILL = (72, 196, 138)
 C_SLIDER_KNOB = (210, 250, 235)
-C_TEXT_PRI    = (210, 208, 200)
-C_TEXT_SEC    = (130, 128, 118)
-C_TEXT_DIM    = ( 65,  63,  58)
-C_LABEL_BRIGHT= (255, 255, 255)
+C_TEXT_PRI = (210, 208, 200)
+C_TEXT_SEC = (130, 128, 118)
+C_TEXT_DIM = (65, 63, 58)
 
-GAME_ACCENT = [          # one accent per game window
-    (160, 140, 255),     # 0  purple
-    ( 72, 210, 168),     # 1  teal
-    ( 88, 168, 255),     # 2  blue
-    (255, 192,  72),     # 3  amber
-    (148, 214,  82),     # 4  green
-    (255, 108,  88),     # 5  coral
+GAME_ACCENT = [
+    (160, 140, 255),  # 0  purple
+    (72, 210, 168),  # 1  teal
+    (88, 168, 255),  # 2  blue
+    (255, 192, 72),  # 3  amber
+    (148, 214, 82),  # 4  green
+    (255, 108, 88),  # 5  coral
 ]
 
-UPF_MIN, UPF_MAX = 1, 1000   # updates-per-frame range
+UPF_MIN, UPF_MAX = 1, 1000
 
 
-# ── Dummy game state (replaced by real PacmanGame in phase 2) ─────────────────
-class DummyGame:
-    """Moving dot that bounces inside a CELL_W × CELL_H box."""
+# ── Game Wrapper ──────────────────────────────────────────────────────────────
+class GameSession:
+    """Wraps a TankGame and 2 Agents, tracking persistent stats for the UI."""
+
     def __init__(self, idx: int):
-        self.idx     = idx
-        self.x       = CELL_W  / 2.0
-        self.y       = CELL_H  / 2.0
-        self.vx      = 1.8 + idx * 0.4
-        self.vy      = 1.3 + idx * 0.3
-        self.ticks   = 0
-        self.episodes= 0
-        self.score   = 0
+        self.idx = idx
+        self.game = TankGame()
+        self.agent1 = RandomAgent()
+        self.agent2 = RandomAgent()
+
+        self.states = self.game.reset()
+        self.ticks = 0
+        self.episodes = 1
+        self.wins_p1 = 0
+        self.wins_p2 = 0
 
     def step(self):
-        self.x  += self.vx
-        self.y  += self.vy
+        # 1. Ask agents for actions based on current states
+        a1 = self.agent1.get_action(self.states[0])
+        a2 = self.agent2.get_action(self.states[1])
+
+        # 2. Advance the environment
+        self.states, rewards, done = self.game.step([a1, a2])
         self.ticks += 1
-        self.score += 1
-        if self.x <= 10 or self.x >= CELL_W - 10:
-            self.vx *= -1
-        if self.y <= 10 or self.y >= CELL_H - 10:
-            self.vy *= -1
-        if self.ticks % 400 == 0:
+
+        # 3. Handle resets and score tracking
+        if done:
+            if "TANK 1 WINS" in self.game.result_text:
+                self.wins_p1 += 1
+            elif "TANK 2 WINS" in self.game.result_text:
+                self.wins_p2 += 1
+
             self.episodes += 1
+            self.states = self.game.reset()
 
 
 # ── Slider helper ─────────────────────────────────────────────────────────────
 class Slider:
-    TRACK_H   = 6
-    KNOB_R    = 11
-    PAD_X     = 180    # horizontal padding inside the bottom bar
+    TRACK_H = 6
+    KNOB_R = 11
+    PAD_X = 180
 
     def __init__(self):
-        self.value   = 1      # current UPF
-        self._drag   = False
-        self._track  = pygame.Rect(0, 0, 0, 0)   # set in draw()
+        self.value = 1
+        self._drag = False
+        self._track = pygame.Rect(0, 0, 0, 0)
 
     @property
     def upf(self) -> int:
@@ -122,67 +133,49 @@ class Slider:
         elif event.type == pygame.MOUSEMOTION and self._drag:
             self.value = max(UPF_MIN, min(UPF_MAX, self._x_to_val(event.pos[0])))
 
-    def draw(self, surf: pygame.Surface, bar_rect: pygame.Rect,
-             font_sm, font_xs) -> None:
-        # build track rect (log-scaled slider)
+    def draw(self, surf: pygame.Surface, bar_rect: pygame.Rect, font_sm, font_xs) -> None:
         tx = bar_rect.left + self.PAD_X
         ty = bar_rect.centery
         tw = bar_rect.width - self.PAD_X * 2
         self._track = pygame.Rect(tx, ty - self.TRACK_H // 2, tw, self.TRACK_H)
 
-        # label left
         lbl = font_sm.render("TICK SPEED", True, C_TEXT_DIM)
-        surf.blit(lbl, (bar_rect.left + 20,
-                        bar_rect.centery - lbl.get_height() // 2))
+        surf.blit(lbl, (bar_rect.left + 20, bar_rect.centery - lbl.get_height() // 2))
 
-        # rail
         pygame.draw.rect(surf, C_SLIDER_RAIL, self._track, border_radius=3)
-
-        # filled portion
-        kx   = self._val_to_x()
-        fill = pygame.Rect(self._track.left, self._track.top,
-                           kx - self._track.left, self.TRACK_H)
+        kx = self._val_to_x()
+        fill = pygame.Rect(self._track.left, self._track.top, kx - self._track.left, self.TRACK_H)
         pygame.draw.rect(surf, C_SLIDER_FILL, fill, border_radius=3)
-
-        # knob
         pygame.draw.circle(surf, C_SLIDER_KNOB, (kx, ty), self.KNOB_R)
         pygame.draw.circle(surf, C_SLIDER_FILL, (kx, ty), self.KNOB_R - 3)
 
-        # value label right
         upf_lbl = font_sm.render(
             f"{self.upf} UPF  ({'max speed' if self.upf >= UPF_MAX else 'watching' if self.upf == 1 else ''})",
             True, C_TEXT_SEC)
-        surf.blit(upf_lbl, (self._track.right + 20,
-                            bar_rect.centery - upf_lbl.get_height() // 2))
+        surf.blit(upf_lbl, (self._track.right + 20, bar_rect.centery - upf_lbl.get_height() // 2))
 
-        # min / max ticks
         for label, xpos in [("1", self._track.left), ("1000", self._track.right)]:
             t = font_xs.render(label, True, C_TEXT_DIM)
-            surf.blit(t, (xpos - t.get_width() // 2,
-                          self._track.bottom + 6))
+            surf.blit(t, (xpos - t.get_width() // 2, self._track.bottom + 6))
 
 
 # ── Scrollable stats panel ────────────────────────────────────────────────────
 class StatsPanel:
-    LINE_H      = 20
-    PAD_X       = 16
-    PAD_TOP     = 14
+    LINE_H = 20
+    PAD_X = 16
+    PAD_TOP = 14
 
     def __init__(self):
-        self._scroll   = 0       # scroll offset in lines
-        self._lines    = []      # list of (text, color, indent)
-        self._surf_h   = 0       # total rendered height in px
-        self._hover    = False
-        self._panel    = pygame.Rect(0, 0, 0, 0)
+        self._scroll = 0
+        self._lines = []
+        self._hover = False
+        self._panel = pygame.Rect(0, 0, 0, 0)
 
-    # ── public ──────────────────────────────────────────────────────────
     def set_panel_rect(self, r: pygame.Rect):
         self._panel = r
 
-    def rebuild(self, games: list, upf: int, fps: float):
-        """Rebuild the full line list from current game states."""
+    def rebuild(self, sessions: list, upf: int, fps: float):
         lines = []
-        A = GAME_ACCENT
 
         def push(text, color=C_TEXT_SEC, indent=0):
             lines.append((text, color, indent))
@@ -191,38 +184,30 @@ class StatsPanel:
         push(f"FPS  {fps:5.1f}      UPF  {upf}", C_TEXT_DIM)
         push("")
 
-        for g in games:
-            ac = A[g.idx]
-            push(f"── GAME {g.idx + 1} ──────────────────", ac)
-            push(f"Episode     {g.episodes:>6}", C_TEXT_SEC, 4)
-            push(f"Score       {g.score:>6}", C_TEXT_SEC, 4)
-            push(f"Ticks       {g.ticks:>6}", C_TEXT_DIM, 4)
+        for s in sessions:
+            ac = GAME_ACCENT[s.idx]
+            push(f"── GAME {s.idx + 1} ──────────────────", ac)
+            push(f"Episode     {s.episodes:>6}", C_TEXT_SEC, 4)
+            push(f"P1 Wins     {s.wins_p1:>6}", C_TEXT_SEC, 4)
+            push(f"P2 Wins     {s.wins_p2:>6}", C_TEXT_SEC, 4)
+            push(f"Ticks       {s.ticks:>6}", C_TEXT_DIM, 4)
             push("")
 
-        push("── LOG ──────────────────────────", C_TEXT_DIM)
-        for i in range(30):
-            push(f"[tick {i*100:>6}]  placeholder log entry {i}", C_TEXT_DIM, 4)
-
-        self._lines   = lines
-        self._surf_h  = len(lines) * self.LINE_H
+        self._lines = lines
 
     def handle_event(self, event):
         if event.type == pygame.MOUSEMOTION:
             self._hover = self._panel.collidepoint(event.pos)
         if event.type == pygame.MOUSEWHEEL and self._hover:
             visible_lines = (self._panel.height - self.PAD_TOP) // self.LINE_H
-            max_scroll    = max(0, len(self._lines) - visible_lines)
-            self._scroll  = max(0, min(max_scroll, self._scroll - event.y * 3))
+            max_scroll = max(0, len(self._lines) - visible_lines)
+            self._scroll = max(0, min(max_scroll, self._scroll - event.y * 3))
 
     def draw(self, surf: pygame.Surface, font_sm, font_xs):
         r = self._panel
-        # background
         pygame.draw.rect(surf, C_PANEL_BG, r)
-        # left border line
-        pygame.draw.line(surf, C_PANEL_LINE,
-                         (r.left, r.top), (r.left, r.bottom), 1)
+        pygame.draw.line(surf, C_PANEL_LINE, (r.left, r.top), (r.left, r.bottom), 1)
 
-        # clip to panel
         clip = surf.get_clip()
         surf.set_clip(r.inflate(-2, -2))
 
@@ -240,80 +225,44 @@ class StatsPanel:
 
         surf.set_clip(clip)
 
-        # scroll indicator
         if len(self._lines) > 0:
             visible_lines = (r.height - self.PAD_TOP) // self.LINE_H
             if len(self._lines) > visible_lines:
-                ratio     = visible_lines / len(self._lines)
-                bar_h     = max(30, int(r.height * ratio))
+                ratio = visible_lines / len(self._lines)
+                bar_h = max(30, int(r.height * ratio))
                 max_scroll = len(self._lines) - visible_lines
-                bar_y = r.top + int((r.height - bar_h) *
-                                    (self._scroll / max(1, max_scroll)))
-                pygame.draw.rect(surf, C_PANEL_LINE,
-                                 (r.right - 5, bar_y, 4, bar_h), border_radius=2)
-
-
-# ── Game cell renderer ────────────────────────────────────────────────────────
-def draw_cell(surf: pygame.Surface, game: DummyGame, font_sm, font_xs):
-    """Render one game cell (phase 1 = moving dot placeholder)."""
-    surf.fill(C_CELL_BG)
-
-    accent = GAME_ACCENT[game.idx]
-
-    # thin accent border
-    pygame.draw.rect(surf, accent, surf.get_rect(), 1)
-
-    # moving dot
-    pygame.draw.circle(surf, (255, 220, 30),
-                       (int(game.x), int(game.y)), 8)
-    # dot glow ring
-    pygame.draw.circle(surf, (200, 170, 20),
-                       (int(game.x), int(game.y)), 12, 1)
-
-    # label top-left
-    lbl = font_sm.render(f"GAME {game.idx + 1}", True, accent)
-    surf.blit(lbl, (10, 8))
-
-    # score bottom-left
-    sc = font_xs.render(f"ep {game.episodes}  score {game.score}", True, C_TEXT_DIM)
-    surf.blit(sc, (10, surf.get_height() - sc.get_height() - 8))
+                bar_y = r.top + int((r.height - bar_h) * (self._scroll / max(1, max_scroll)))
+                pygame.draw.rect(surf, C_PANEL_LINE, (r.right - 5, bar_y, 4, bar_h), border_radius=2)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     pygame.init()
-    pygame.display.set_caption("Pac-Man RL Trainer")
+    pygame.display.set_caption("Combat Tank RL Trainer")
 
-    # fullscreen at exact native resolution
     screen = pygame.display.set_mode((SW, SH), pygame.FULLSCREEN | pygame.HWSURFACE | pygame.DOUBLEBUF)
 
-    # fonts
-    font_md = pygame.font.SysFont("consolas",   15, bold=True)
-    font_sm = pygame.font.SysFont("consolas",   13, bold=True)
-    font_xs = pygame.font.SysFont("consolas",   12)
+    font_md = pygame.font.SysFont("consolas", 15, bold=True)
+    font_sm = pygame.font.SysFont("consolas", 13, bold=True)
+    font_xs = pygame.font.SysFont("consolas", 12)
 
-    # sub-surfaces — each game renders here then gets blitted to screen
     cells: list[pygame.Surface] = [
         pygame.Surface((CELL_W, CELL_H)) for _ in range(NUM_GAMES)
     ]
 
-    # rects for layout sections
-    panel_rect  = pygame.Rect(GAME_AREA_W, 0, PANEL_W, SH - BOTTOM_H)
+    panel_rect = pygame.Rect(GAME_AREA_W, 0, PANEL_W, SH - BOTTOM_H)
     bottom_rect = pygame.Rect(0, SH - BOTTOM_H, SW, BOTTOM_H)
 
-    # components
-    games  = [DummyGame(i) for i in range(NUM_GAMES)]
+    # Instantiate Game Sessions instead of DummyGames
+    sessions = [GameSession(i) for i in range(NUM_GAMES)]
     slider = Slider()
-    panel  = StatsPanel()
+    panel = StatsPanel()
     panel.set_panel_rect(panel_rect)
 
-    clock    = pygame.time.Clock()
-    fps      = 0.0
-    tick_ctr = 0
+    clock = pygame.time.Clock()
 
     running = True
     while running:
-        # ── events ────────────────────────────────────────────────────────────
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -325,38 +274,50 @@ def main():
         if not running:
             break
 
-        # ── logic: run N updates per frame ────────────────────────────────────
+        # ── logic ────────────────────────────────────────────────────────────
         upf = slider.upf
         for _ in range(upf):
-            pygame.event.pump()      # keep OS happy without processing events
-            for g in games:
-                g.step()
-            tick_ctr += 1
+            pygame.event.pump()
+            for s in sessions:
+                s.step()
 
         # ── render ────────────────────────────────────────────────────────────
         screen.fill(C_BG)
 
-        # 6 game cells
-        for i, (g, surf) in enumerate(zip(games, cells)):
-            draw_cell(surf, g, font_sm, font_xs)
+        for i, (s, surf) in enumerate(zip(sessions, cells)):
+            surf.fill(C_CELL_BG)
+            accent = GAME_ACCENT[s.idx]
+
+            # Use renderer.py to draw the game state
+            # Center the 500x380 arena inside the 502x501 cell
+            arena_surf = pygame.Surface((25 * TILE_SIZE, 19 * TILE_SIZE))
+            draw_game(arena_surf, s.game, tile=TILE_SIZE)
+
+            offset_x = (CELL_W - arena_surf.get_width()) // 2
+            offset_y = (CELL_H - arena_surf.get_height()) // 2
+            surf.blit(arena_surf, (offset_x, offset_y))
+
+            # HUD Overlays
+            pygame.draw.rect(surf, accent, surf.get_rect(), 1)
+            lbl = font_sm.render(f"GAME {s.idx + 1}", True, accent)
+            surf.blit(lbl, (10, 8))
+            sc = font_xs.render(f"ep {s.episodes}  |  P1 {s.wins_p1} - {s.wins_p2} P2", True, C_TEXT_DIM)
+            surf.blit(sc, (10, surf.get_height() - sc.get_height() - 8))
+
             ox, oy = cell_origin(i)
             screen.blit(surf, (ox, oy))
 
-        # right stats panel
         fps = clock.get_fps()
-        panel.rebuild(games, upf, fps)
+        panel.rebuild(sessions, upf, fps)
         panel.draw(screen, font_sm, font_xs)
 
-        # bottom slider bar
         pygame.draw.rect(screen, C_PANEL_BG, bottom_rect)
-        pygame.draw.line(screen, C_PANEL_LINE,
-                         bottom_rect.topleft, bottom_rect.topright, 1)
+        pygame.draw.line(screen, C_PANEL_LINE, bottom_rect.topleft, bottom_rect.topright, 1)
         slider.draw(screen, bottom_rect, font_sm, font_xs)
 
         pygame.display.flip()
         clock.tick(144)
 
-    # ── clean exit ────────────────────────────────────────────────────────────
     pygame.quit()
     sys.exit(0)
 
