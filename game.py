@@ -291,10 +291,20 @@ class TankGame:
         tank.cooldown = SHOOT_COOLDOWN
 
     def _plant_mine(self, tank):
+        # 1. Check if they have mines in their inventory
         if tank.mines <= 0:
             return
+
+        # 2. THE FIX: Check how many mines this specific player already has on the board
+        active_count = sum(1 for m in self.active_mines if m.owner_id == tank.player_id)
+        if active_count >= MAX_MINES:
+            return
+
+        # 3. Check if there is already a mine on this exact tile
         if any(m.x == tank.x and m.y == tank.y for m in self.active_mines):
             return
+
+        # 4. Plant the mine and reduce inventory
         self.active_mines.append(Mine(tank.x, tank.y, tank.player_id))
         tank.mines -= 1
 

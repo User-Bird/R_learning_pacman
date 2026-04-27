@@ -1,8 +1,9 @@
 """
 main.py  ─  Phase 3: 6 Live RandomAgent Games
 ─────────────────────────────────────────────────
-Runs 6 independent TankGame instances.
-Each game is driven by 2 RandomAgents.
+Runs 6 independent TankGame instances driven by RandomAgents.
+Fixed: Removed the broken "tick budget" that caused OS lockups.
+Fixed: Capped to 60 FPS to prevent CPU overheating at max UPF.
 """
 
 import pygame
@@ -23,8 +24,8 @@ NUM_GAMES = COLS * ROWS
 
 GAME_AREA_W = SW - PANEL_W
 GAME_AREA_H = SH - BOTTOM_H
-CELL_W = (GAME_AREA_W - GAP * (COLS + 1)) // COLS  # ~502
-CELL_H = (GAME_AREA_H - GAP * (ROWS + 1)) // ROWS  # ~501
+CELL_W = (GAME_AREA_W - GAP * (COLS + 1)) // COLS
+CELL_H = (GAME_AREA_H - GAP * (ROWS + 1)) // ROWS
 TILE_SIZE = 20  # 25 cols * 20 = 500px width
 
 
@@ -253,7 +254,7 @@ def main():
     panel_rect = pygame.Rect(GAME_AREA_W, 0, PANEL_W, SH - BOTTOM_H)
     bottom_rect = pygame.Rect(0, SH - BOTTOM_H, SW, BOTTOM_H)
 
-    # Instantiate Game Sessions instead of DummyGames
+    # Instantiate Game Sessions
     sessions = [GameSession(i) for i in range(NUM_GAMES)]
     slider = Slider()
     panel = StatsPanel()
@@ -263,6 +264,7 @@ def main():
 
     running = True
     while running:
+        # pygame.event.get() naturally pumps the queue, saving CPU.
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -274,22 +276,20 @@ def main():
         if not running:
             break
 
-        # ── logic ────────────────────────────────────────────────────────────
+        # ── Pure, clean Logic Loop ────────────────────────────────────────────
+        # No time budget, no OS hijacking. Just run X updates based on slider.
         upf = slider.upf
         for _ in range(upf):
-            pygame.event.pump()
             for s in sessions:
                 s.step()
 
-        # ── render ────────────────────────────────────────────────────────────
+        # ── Render ────────────────────────────────────────────────────────────
         screen.fill(C_BG)
 
         for i, (s, surf) in enumerate(zip(sessions, cells)):
             surf.fill(C_CELL_BG)
             accent = GAME_ACCENT[s.idx]
 
-            # Use renderer.py to draw the game state
-            # Center the 500x380 arena inside the 502x501 cell
             arena_surf = pygame.Surface((25 * TILE_SIZE, 19 * TILE_SIZE))
             draw_game(arena_surf, s.game, tile=TILE_SIZE)
 
@@ -297,7 +297,6 @@ def main():
             offset_y = (CELL_H - arena_surf.get_height()) // 2
             surf.blit(arena_surf, (offset_x, offset_y))
 
-            # HUD Overlays
             pygame.draw.rect(surf, accent, surf.get_rect(), 1)
             lbl = font_sm.render(f"GAME {s.idx + 1}", True, accent)
             surf.blit(lbl, (10, 8))
@@ -316,7 +315,9 @@ def main():
         slider.draw(screen, bottom_rect, font_sm, font_xs)
 
         pygame.display.flip()
-        clock.tick(144)
+
+        # Capped to 60. At 1000 UPF, this gives 60,000 TPS which is perfectly safe.
+        clock.tick(60)
 
     pygame.quit()
     sys.exit(0)

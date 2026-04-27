@@ -26,7 +26,7 @@ class RandomAgent(Agent):
         pool = [0, 1, 2, 4]                        # always available
 
         if state.get("can_shoot"):
-            pool += [3, 3]                          # double-weight shoot
+            pool += [3] * 50  # CHAOS: 50x weight to shoot!                         # double-weight shoot
 
         if state.get("can_mine"):
             pool += [5]
