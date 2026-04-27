@@ -114,16 +114,23 @@ def generate_random_map():
                 if 0 < r < ROWS - 1 and 0 < c < COLS - 1:
                     grid[r][c] = EMPTY
 
-    # 4. Place charge tiles
+    # 4. Place charge tiles — no two within 3x3 of each other
     charge_tiles = []
-    while len(charge_tiles) < 6:
+    attempts = 0
+    while len(charge_tiles) < 6 and attempts < 2000:
+        attempts += 1
         r = random.randint(2, ROWS - 3)
         c = random.randint(2, COLS - 3)
-        if grid[r][c] == EMPTY and (c, r) not in charge_tiles:
-            # Ensure it's not placed directly on spawn
-            if (c, r) != SPAWN1 and (c, r) != SPAWN2:
-                grid[r][c] = CHARGE_TILE
-                charge_tiles.append((c, r))
+        if grid[r][c] != EMPTY:
+            continue
+        if (c, r) == SPAWN1 or (c, r) == SPAWN2:
+            continue
+        # Check no existing charge tile is within 3x3 (chebyshev dist <= 2)
+        too_close = any(abs(c - ec) <= 2 and abs(r - er) <= 2 for (ec, er) in charge_tiles)
+        if too_close:
+            continue
+        grid[r][c] = CHARGE_TILE
+        charge_tiles.append((c, r))
 
     return grid, charge_tiles
 
@@ -164,6 +171,7 @@ class Mine:
         self.x = x
         self.y = y
         self.owner_id = owner_id
+        self.health = 2  # takes 2 bullets to destroy
 
 
 # ── Game state ─────────────────────────────────────────────────────────────────
@@ -193,6 +201,10 @@ class TankDebugGame:
         nx = tank.x + DX[tank.direction]
         ny = tank.y + DY[tank.direction]
         if self.is_walkable(nx, ny):
+            # Block if the other tank is already on that tile
+            other = self.tank2 if tank.player_id == 1 else self.tank1
+            if other.alive and other.x == nx and other.y == ny:
+                return
             tank.x, tank.y = nx, ny
 
     def rotate(self, tank, clockwise: bool):
@@ -291,6 +303,23 @@ class TankDebugGame:
 
             b.x, b.y = float(nx), float(ny)
 
+            # Check bullet hitting a mine
+            mine_hit = False
+            for m in self.active_mines:
+                if int(b.x) == m.x and int(b.y) == m.y:
+                    m.health -= 1
+                    mine_hit = True
+                    if m.health <= 0:
+                        # Mine destroyed — refund to owner
+                        owner = self.tank1 if m.owner_id == 1 else self.tank2
+                        owner.mines = min(MAX_MINES, owner.mines + 1)
+                        self.active_mines.remove(m)
+                    break  # bullet consumed by mine hit
+
+            if mine_hit:
+                continue  # bullet stops at mine
+
+            # Check bullet hitting a tank
             hit = False
             for tank in [self.tank1, self.tank2]:
                 if not tank.alive: continue
@@ -306,17 +335,25 @@ class TankDebugGame:
         self.bullets = alive
 
     def _check_mines(self):
-        """Trigger mines if an enemy enters their 3x3 zone"""
+        """3x3 core = damage + mine consumed (refunded to owner). 4th ring = detection only. Owner immune."""
         surviving_mines = []
         for m in self.active_mines:
             triggered = False
             for tank in [self.tank1, self.tank2]:
-                if tank.alive and tank.player_id != m.owner_id:
-                    # 3x3 check: abs(dx) <= 1 and abs(dy) <= 1
-                    if abs(tank.x - m.x) <= 1 and abs(tank.y - m.y) <= 1:
-                        tank.health -= 2
-                        triggered = True
-
+                if not tank.alive:
+                    continue
+                if tank.player_id == m.owner_id:
+                    continue  # owner immune
+                dx = abs(tank.x - m.x)
+                dy = abs(tank.y - m.y)
+                if dx <= 1 and dy <= 1:
+                    tank.health -= 2
+                    triggered = True
+                    # Refund mine to owner on successful trigger
+                    owner = self.tank1 if m.owner_id == 1 else self.tank2
+                    owner.mines = min(MAX_MINES, owner.mines + 1)
+                    break
+                # 4th ring (chebyshev dist 2): no damage, mine stays
             if not triggered:
                 surviving_mines.append(m)
         self.active_mines = surviving_mines
@@ -419,6 +456,14 @@ def draw_tank(surf, tank, tile, is_player):
         color = body_c if i < tank.health else (40, 40, 50)
         pygame.draw.rect(surf, color, (px + i * (pip_w + pip_gap), py, pip_w, 4))
 
+    # Ammo pips (row below health pips)
+    ammo_total = MAX_AMMO * (pip_w + pip_gap) - pip_gap
+    apx = cx - ammo_total // 2
+    apy = py + 7
+    for i in range(MAX_AMMO):
+        color = C_CHARGE_GLOW if i < tank.ammo else (40, 40, 50)
+        pygame.draw.rect(surf, color, (apx + i * (pip_w + pip_gap), apy, pip_w, 3))
+
     # Charging indicator ring
     if tank.charge_progress > 0:
         frac = tank.charge_progress / CHARGE_TICKS
@@ -440,14 +485,27 @@ def draw_mine(surf, mine, tile):
     cy = int(mine.y * tile + tile // 2)
     color = C_MINE_P1 if mine.owner_id == 1 else C_MINE_P2
 
-    # Faint 3x3 Warning Zone
-    zone_rect = pygame.Rect((mine.x - 1) * tile, (mine.y - 1) * tile, tile * 3, tile * 3)
-    zone_surf = pygame.Surface((tile * 3, tile * 3), pygame.SRCALPHA)
-    zone_surf.fill((*color, 20))  # 20 alpha for very faint glow
-    surf.blit(zone_surf, zone_rect.topleft)
-    pygame.draw.rect(surf, (*color, 50), zone_rect, 1)
+    # 4th ring (5x5 area) — grey warning, no damage zone
+    r4x = max(0, (mine.x - 2) * tile)
+    r4y = max(0, (mine.y - 2) * tile)
+    r4w = min(ARENA_W, (mine.x + 3) * tile) - r4x
+    r4h = min(ARENA_H, (mine.y + 3) * tile) - r4y
+    ring4_surf = pygame.Surface((r4w, r4h), pygame.SRCALPHA)
+    ring4_surf.fill((100, 100, 100, 12))  # grey, very faint
+    surf.blit(ring4_surf, (r4x, r4y))
+    pygame.draw.rect(surf, (100, 100, 100, 35), pygame.Rect(r4x, r4y, r4w, r4h), 1)
 
-    # Central Mine Icon
+    # 3x3 core — actual damage zone, team color tint
+    zx = max(0, (mine.x - 1) * tile)
+    zy = max(0, (mine.y - 1) * tile)
+    zw = min(ARENA_W, (mine.x + 2) * tile) - zx
+    zh = min(ARENA_H, (mine.y + 2) * tile) - zy
+    zone_surf = pygame.Surface((zw, zh), pygame.SRCALPHA)
+    zone_surf.fill((*color, 22))
+    surf.blit(zone_surf, (zx, zy))
+    pygame.draw.rect(surf, (*color, 55), pygame.Rect(zx, zy, zw, zh), 1)
+
+    # Central mine icon
     pygame.draw.circle(surf, color, (cx, cy), 6)
     pygame.draw.circle(surf, (255, 255, 255), (cx, cy), 2)
 
