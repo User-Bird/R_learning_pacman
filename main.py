@@ -1,9 +1,8 @@
 """
-main.py  ─  Phase 3: 6 Live RandomAgent Games
+main.py  ─  Phase 4: Live DQN Training Games
 ─────────────────────────────────────────────────
-Runs 6 independent TankGame instances driven by RandomAgents.
-Fixed: Removed the broken "tick budget" that caused OS lockups.
-Fixed: Capped to 60 FPS to prevent CPU overheating at max UPF.
+Runs 6 independent TankGame instances.
+Each tank is now driven by its own DQNAgent and Trainer.
 """
 
 import pygame
@@ -11,7 +10,8 @@ import sys
 import math
 
 from game import TankGame
-from agent import RandomAgent
+from agent import RandomAgent, DQNAgent
+from rl.trainer import Trainer
 from renderer import draw_game
 
 # ── Layout ────────────────────────────────────────────────────────────────────
@@ -51,11 +51,11 @@ C_TEXT_DIM = (65, 63, 58)
 
 GAME_ACCENT = [
     (160, 140, 255),  # 0  purple
-    (72, 210, 168),  # 1  teal
-    (88, 168, 255),  # 2  blue
-    (255, 192, 72),  # 3  amber
-    (148, 214, 82),  # 4  green
-    (255, 108, 88),  # 5  coral
+    (72, 210, 168),   # 1  teal
+    (88, 168, 255),   # 2  blue
+    (255, 192, 72),   # 3  amber
+    (148, 214, 82),   # 4  green
+    (255, 108, 88),   # 5  coral
 ]
 
 UPF_MIN, UPF_MAX = 1, 1000
@@ -68,8 +68,10 @@ class GameSession:
     def __init__(self, idx: int):
         self.idx = idx
         self.game = TankGame()
-        self.agent1 = RandomAgent()
-        self.agent2 = RandomAgent()
+
+        # Phase 4: Swap RandomAgents for DQNAgents with their own Trainers
+        self.agent1 = DQNAgent(Trainer())
+        self.agent2 = DQNAgent(Trainer())
 
         self.states = self.game.reset()
         self.ticks = 0
@@ -83,15 +85,26 @@ class GameSession:
         a2 = self.agent2.get_action(self.states[1])
 
         # 2. Advance the environment
-        self.states, rewards, done = self.game.step([a1, a2])
+        next_states, rewards, done = self.game.step([a1, a2])
         self.ticks += 1
 
-        # 3. Handle resets and score tracking
+        # 3. Phase 4: Push the experience to the agent's replay buffer!
+        self.agent1.push(self.states[0], a1, rewards[0], next_states[0], done)
+        self.agent2.push(self.states[1], a2, rewards[1], next_states[1], done)
+
+        # Update current state
+        self.states = next_states
+
+        # 4. Handle resets and score tracking
         if done:
             if "TANK 1 WINS" in self.game.result_text:
                 self.wins_p1 += 1
             elif "TANK 2 WINS" in self.game.result_text:
                 self.wins_p2 += 1
+
+            # Phase 4: Decay Epsilon at the end of the episode
+            self.agent1.on_episode_end()
+            self.agent2.on_episode_end()
 
             self.episodes += 1
             self.states = self.game.reset()
@@ -192,6 +205,17 @@ class StatsPanel:
             push(f"P1 Wins     {s.wins_p1:>6}", C_TEXT_SEC, 4)
             push(f"P2 Wins     {s.wins_p2:>6}", C_TEXT_SEC, 4)
             push(f"Ticks       {s.ticks:>6}", C_TEXT_DIM, 4)
+
+            # Phase 4: Draw DQN metrics in the UI
+            eps = getattr(s.agent1, "epsilon", 1.0)
+            loss = getattr(s.agent1, "last_loss", 0.0)
+
+            push(f"Epsilon     {eps:.4f}", C_TEXT_DIM, 4)
+
+            # Highlight loss if it's training (> 0)
+            loss_col = C_TEXT_PRI if loss > 0 else C_TEXT_DIM
+            push(f"Net Loss    {loss:.4f}", loss_col, 4)
+
             push("")
 
         self._lines = lines
@@ -264,7 +288,6 @@ def main():
 
     running = True
     while running:
-        # pygame.event.get() naturally pumps the queue, saving CPU.
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -277,7 +300,6 @@ def main():
             break
 
         # ── Pure, clean Logic Loop ────────────────────────────────────────────
-        # No time budget, no OS hijacking. Just run X updates based on slider.
         upf = slider.upf
         for _ in range(upf):
             for s in sessions:
@@ -316,7 +338,7 @@ def main():
 
         pygame.display.flip()
 
-        # Capped to 60. At 1000 UPF, this gives 60,000 TPS which is perfectly safe.
+        # Capped to 60. At 1000 UPF, this gives 60,000 TPS.
         clock.tick(60)
 
     pygame.quit()
