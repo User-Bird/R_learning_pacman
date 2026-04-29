@@ -9,6 +9,7 @@ Includes Agent Selection UI and Auto-saving on Quit.
 import pygame
 import sys
 import time
+import subprocess
 
 from game import TankGame
 from agent import DQNAgent
@@ -17,7 +18,7 @@ from renderer import draw_game
 
 # ── NEW IMPORTS ────────────────────────────────────────────────────────────────
 from stats_io import write_stats, write_shutdown, clear_stats
-from agent_selector import show_session_mode_picker, save_best_agent
+from agent_selector import show_session_mode_picker, save_agents
 
 
 # ── Session Wrapper ────────────────────────────────────────────────────────────
@@ -34,19 +35,13 @@ class Session:
 
         # ── LOAD SAVED AGENTS LOGIC ───────────────────────────────────────────
         if session_mode == "NEW_VS_AGENT" and agent2_path:
-            self.trainer2.online_net.load(agent2_path, self.trainer2.device)
-            self.trainer2.target_net.load_state_dict(self.trainer2.online_net.state_dict())
-            self.trainer2.epsilon = 0.05   # Exploit mode
+            self.trainer2.load_checkpoint(agent2_path)
 
         elif session_mode == "AGENT_VS_AGENT":
             if agent1_path:
-                self.trainer1.online_net.load(agent1_path, self.trainer1.device)
-                self.trainer1.target_net.load_state_dict(self.trainer1.online_net.state_dict())
-                self.trainer1.epsilon = 0.05
+                self.trainer1.load_checkpoint(agent1_path)
             if agent2_path:
-                self.trainer2.online_net.load(agent2_path, self.trainer2.device)
-                self.trainer2.target_net.load_state_dict(self.trainer2.online_net.state_dict())
-                self.trainer2.epsilon = 0.05
+                self.trainer2.load_checkpoint(agent2_path)
         # ──────────────────────────────────────────────────────────────────────
 
         self.agent1 = DQNAgent(self.trainer1)
@@ -133,6 +128,9 @@ def draw_buttons(screen, current_mode, rects):
 def main():
     # ── Wipe stale stats from last run before starting
     clear_stats()
+
+    # ── AUTO-LAUNCH stats_window in a separate process ─────────────────────────
+    stats_proc = subprocess.Popen([sys.executable, "stats_window.py"])
 
     pygame.init()
 
@@ -246,11 +244,12 @@ def main():
 
     # ── SHUTDOWN LOGIC ─────────────────────────────────────────────────────────
     write_shutdown()  # Tell stats_window to close
-    saved = save_best_agent(sessions, session_mode)
-    if saved:
-        print(f"Best agent saved: {saved}")
+    saved = save_agents(sessions, session_mode)
+    for f in saved:
+        print(f"Saved: {f}")
 
     pygame.quit()
+    stats_proc.wait(timeout=3)  # Wait for stats_window to gracefully exit
     sys.exit(0)
 
 if __name__ == "__main__":
