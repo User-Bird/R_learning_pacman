@@ -2,6 +2,11 @@
 rl/trainer.py  ─  Phase 5: Optimised DQN Trainer
 ──────────────────────────────────────────────────
 Key change: batch_act(encoded_states, epsilons) → one GPU forward pass for N agents.
+
+Phase 5 checkpoint update:
+  save_checkpoint(path, extra)  →  saves weights + epsilon + tick + metadata
+  load_checkpoint(path)         →  restores all of the above (v1 weights-only files
+                                   are still supported for backward compat)
 """
 
 import copy
@@ -41,6 +46,53 @@ class Trainer:
         self.epsilon   = EPSILON_START
         self._tick     = 0
         self.last_loss = 0.0
+
+    # ── Checkpoint save / load ────────────────────────────────────────────────
+
+    def save_checkpoint(self, path: str, extra_info: dict = None):
+        """
+        Save full training state so a resumed session has the same epsilon,
+        training progress, and weights.
+
+        extra_info : optional dict of anything you want stored alongside
+                     (e.g. episodes, win_rate, session_mode, saved_at)
+        """
+        checkpoint = {
+            "version":    2,
+            "state_dict": self.online_net.state_dict(),
+            "epsilon":    self.epsilon,
+            "tick":       self._tick,
+        }
+        if extra_info:
+            checkpoint.update(extra_info)
+        torch.save(checkpoint, path)
+        print(f"[trainer] checkpoint saved → {path}  (ε={self.epsilon:.4f}, tick={self._tick:,})")
+
+    def load_checkpoint(self, path: str) -> dict:
+        """
+        Load a checkpoint from path.  Handles two formats:
+          v1 (legacy) : raw state_dict only   → weights loaded, epsilon stays at 0.05
+          v2          : full dict with 'state_dict' key → weights + epsilon + tick restored
+
+        Returns the raw checkpoint dict so callers can read metadata (episodes, win_rate …).
+        """
+        raw = torch.load(path, map_location=self.device, weights_only=False)
+
+        if isinstance(raw, dict) and "state_dict" in raw:
+            # ── v2: full checkpoint ───────────────────────────────────────────
+            self.online_net.load_state_dict(raw["state_dict"])
+            self.epsilon = raw.get("epsilon", EPSILON_END)
+            self._tick   = raw.get("tick",    0)
+            print(f"[trainer] loaded v2 checkpoint from {path}  "
+                  f"(ε={self.epsilon:.4f}, tick={self._tick:,}, "
+                  f"ep={raw.get('episodes', '?')})")
+            return raw
+        else:
+            # ── v1: just weights (backward compat) ───────────────────────────
+            self.online_net.load_state_dict(raw)
+            self.epsilon = EPSILON_END    # safe exploitation default
+            print(f"[trainer] loaded v1 weights from {path}  (ε set to {EPSILON_END})")
+            return {}
 
     # ── Single-agent fallback ─────────────────────────────────────────────────
     def get_action(self, state: dict) -> int:

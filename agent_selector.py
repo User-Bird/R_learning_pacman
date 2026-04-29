@@ -5,17 +5,24 @@ Provides:
   show_session_mode_picker(screen, fonts)  →  ("NEW_VS_NEW" | "NEW_VS_AGENT" | "AGENT_VS_AGENT",
                                                agent_path_1_or_None, agent_path_2_or_None)
 
-  save_best_agent(sessions, session_mode)  →  saved filename (str) or None
+  save_agents(sessions, session_mode)  →  list of saved filenames
+
+What gets saved per mode
+────────────────────────
+  NEW_VS_NEW     → best agent across all 6 games (1 file)
+  NEW_VS_AGENT   → best P1 (agentB / new challenger)  +  best P2 (agentAA / battle-hardened)
+  AGENT_VS_AGENT → best P1 (agentAAA lineage)         +  best P2 (agentBB lineage)
+
+Each .pt file is a full checkpoint dict:
+  version, state_dict, epsilon, tick, episodes, win_rate, player, session_mode, saved_at
 
 Call show_session_mode_picker() before starting the main loop.
-Call save_best_agent() in your shutdown sequence after pygame.quit().
+Call save_agents() in your shutdown sequence after pygame.quit().
 """
 
 import os
 import glob
-import time
 import datetime
-import shutil
 
 import pygame
 import torch
@@ -255,69 +262,143 @@ def show_session_mode_picker(screen, fonts):
         clock.tick(30)
 
 
-# ── Save best agent on close ───────────────────────────────────────────────────
+# ── Internal: find best trainer per side ──────────────────────────────────────
 
-def save_best_agent(sessions, session_mode: str) -> str | None:
+def _find_best(sessions, player_id: int):
     """
-    After the main loop ends, find the best performing agent across all 6 games
-    and save its weights.
+    Among all sessions, find the trainer and stats for the best agent on
+    player_id's side (1 or 2).
 
-    'Best' = highest win rate (wins / episodes).  Ties broken by epsilon
-    (lower is better — more exploitation).
+    'Best' = highest win-rate; ties broken by lower epsilon (more trained).
 
-    Filename format:
-        saved_agents/agent_<name>_<YYYY-MM-DD>_ep<N>.pt
-
-    Returns the saved filename, or None if nothing was saved.
+    Returns (session, trainer, total_ep, win_count, win_rate)  or  None.
     """
-    _ensure_agents_dir()
-
-    best_session  = None
-    best_player   = None     # 1 or 2
-    best_winrate  = -1.0
+    best = None
+    best_wr = -1.0
 
     for s in sessions:
         ep = s.episodes
         if ep == 0:
             continue
-        wr1 = s.wins_p1 / ep
-        wr2 = s.wins_p2 / ep
 
-        # Pick the better of the two agents in this session
-        if wr1 >= wr2:
-            wr, pid = wr1, 1
+        if player_id == 1:
+            wins = s.wins_p1
+            trainer = s.trainer1
         else:
-            wr, pid = wr2, 2
+            wins = s.wins_p2
+            trainer = s.trainer2
 
-        # Prefer lower epsilon on equal winrate (more trained)
-        trainer  = s.trainer1 if pid == 1 else s.trainer2
-        eps      = trainer.epsilon
+        wr = wins / ep
 
-        if (wr > best_winrate or
-                (wr == best_winrate and
-                 best_session is not None and
-                 eps < (s.trainer1 if best_player == 1 else s.trainer2).epsilon)):
-            best_winrate  = wr
-            best_session  = s
-            best_player   = pid
+        # Prefer higher win-rate; break ties with lower epsilon
+        if best is None or wr > best_wr or (
+                wr == best_wr and trainer.epsilon < best[2].epsilon):
+            best = (s, wins, trainer, ep, wr)
+            best_wr = wr
 
-    if best_session is None:
-        return None   # no episodes played at all
+    if best is None:
+        return None
+    s, wins, trainer, ep, wr = best
+    return s, trainer, ep, wins, wr
 
-    trainer   = best_session.trainer1 if best_player == 1 else best_session.trainer2
-    total_ep  = best_session.episodes
 
-    # Build a short human-readable name from session mode
-    label_map = {
-        "NEW_VS_NEW":       "newnew",
-        "NEW_VS_AGENT":     "nva",
-        "AGENT_VS_AGENT":   "ava",
-    }
-    label = label_map.get(session_mode, "unknown")
+def _save_one(trainer, ep: int, wins: int, wr: float,
+              player_id: int, session_mode: str, tag: str) -> str:
+    """
+    Save a full checkpoint for one trainer.
+
+    Filename:  saved_agents/agent_{tag}_p{player_id}_{date}_ep{N}.pt
+    """
+    _ensure_agents_dir()
     date  = datetime.datetime.now().strftime("%Y-%m-%d")
-    fname = f"agent_{label}_{date}_ep{total_ep}.pt"
+    fname = f"agent_{tag}_p{player_id}_{date}_ep{ep}.pt"
     fpath = os.path.join(AGENTS_DIR, fname)
 
-    torch.save(trainer.online_net.state_dict(), fpath)
-    print(f"[save] Best agent saved → {fpath}  (win-rate {best_winrate:.2%})")
+    trainer.save_checkpoint(fpath, extra_info={
+        "episodes":     ep,
+        "wins":         wins,
+        "win_rate":     wr,
+        "player":       player_id,
+        "session_mode": session_mode,
+        "saved_at":     datetime.datetime.now().isoformat(),
+    })
+    print(f"[save] P{player_id} → {fpath}  "
+          f"(win-rate {wr:.2%}, ε={trainer.epsilon:.4f}, ep={ep})")
     return fname
+
+
+# ── Public: save agents on shutdown ───────────────────────────────────────────
+
+def save_agents(sessions, session_mode: str) -> list[str]:
+    """
+    Called by main.py after the main loop ends.
+
+    What gets saved depends on the session mode:
+
+      NEW_VS_NEW
+        → 1 file: best agent across all 12 agents (both P1 and P2)
+
+      NEW_VS_AGENT
+        → 2 files:
+            best P1  (the new challenger — what you'd call agentB)
+            best P2  (the battle-hardened loaded agent — what you'd call agentAA)
+
+      AGENT_VS_AGENT
+        → 2 files:
+            best P1  (agentAAA lineage)
+            best P2  (agentBB  lineage)
+
+    Each .pt file is a FULL checkpoint (weights + epsilon + tick + metadata).
+    Returns a list of saved filenames (1 or 2 items, or [] if nothing played).
+    """
+    label_map = {
+        "NEW_VS_NEW":     "newnew",
+        "NEW_VS_AGENT":   "nva",
+        "AGENT_VS_AGENT": "ava",
+    }
+    tag = label_map.get(session_mode, "unknown")
+    saved = []
+
+    if session_mode == "NEW_VS_NEW":
+        # ── single best agent across all 12 slots ────────────────────────────
+        best_overall = None
+        best_wr      = -1.0
+
+        for pid in (1, 2):
+            result = _find_best(sessions, pid)
+            if result is None:
+                continue
+            _, trainer, ep, wins, wr = result
+            if wr > best_wr or (wr == best_wr and
+                    best_overall is not None and
+                    trainer.epsilon < best_overall[0].epsilon):
+                best_overall = (trainer, ep, wins, wr, pid)
+                best_wr = wr
+
+        if best_overall:
+            trainer, ep, wins, wr, pid = best_overall
+            fname = _save_one(trainer, ep, wins, wr, pid, session_mode, tag)
+            saved.append(fname)
+
+    elif session_mode in ("NEW_VS_AGENT", "AGENT_VS_AGENT"):
+        # ── save best for each side independently ─────────────────────────────
+        for pid in (1, 2):
+            result = _find_best(sessions, pid)
+            if result is None:
+                continue
+            _, trainer, ep, wins, wr = result
+            fname = _save_one(trainer, ep, wins, wr, pid, session_mode, tag)
+            saved.append(fname)
+
+    if not saved:
+        print("[save] No episodes played — nothing saved.")
+
+    return saved
+
+
+# ── Backward-compat alias ─────────────────────────────────────────────────────
+# old code called save_best_agent; keep it working as a single-return wrapper.
+
+def save_best_agent(sessions, session_mode: str) -> str | None:
+    saved = save_agents(sessions, session_mode)
+    return saved[0] if saved else None
