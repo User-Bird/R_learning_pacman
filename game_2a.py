@@ -6,7 +6,7 @@ Player 2 (RED):    Random bot — moves, shoots, and plants mines randomly
 Close: ESC or window X
 
 Changes from original:
-  - Procedural Map Generation on every episode reset.
+  - Procedural Map Generation uses multiple structured templates per quadrant.
   - Proximity Mines added (Max 3, 3x3 range, -2 health damage).
   - UI preserved and updated to track mines.
 """
@@ -88,12 +88,149 @@ RESET_DELAY = 120
 SPAWN1 = (3, 1)
 SPAWN2 = (21, 17)
 
+MINE_PENALTY_RANGE = 7
+R_STUPID_MINE      = -10.0
 
-# ── Procedural Map Generation ──────────────────────────────────────────────────
+
+# ── Procedural Map Generation (Structured Templates v3) ────────────────────────
+
+_SPAWN_TEMPLATES = [
+    # Object 1 — single wall, full 3×3 protected ring (rare)
+    [
+        [2, 2, 2],
+        [2, 1, 2],
+        [2, 2, 2],
+    ],
+    # Object 2 — two-wall vertical strip
+    [
+        [0, 2, 2],
+        [0, 1, 2],
+        [0, 1, 2],
+        [0, 2, 2],
+    ],
+    # Object 3 — two-wall L-stub
+    [
+        [0, 2, 2],
+        [0, 1, 2],
+        [0, 1, 0],
+        [0, 0, 0],
+    ],
+    # Object 4 — three-wall vertical strip
+    [
+        [0, 0, 2],
+        [0, 1, 2],
+        [0, 1, 2],
+        [0, 1, 2],
+        [0, 0, 2],
+    ],
+]
+_SPAWN_WEIGHTS = [1, 3, 3, 3]
+
+_NON_SPAWN_TEMPLATES = [
+    # Object 1 — spiral / stepped shape
+    [
+        [2, 2, 2, 2, 2],
+        [0, 1, 1, 1, 2],
+        [0, 2, 2, 1, 2],
+        [0, 1, 2, 1, 2],
+        [2, 0, 0, 0, 2],
+    ],
+    # Object 2 — double horizontal bar
+    [
+        [2, 2, 2, 2, 2],
+        [0, 1, 1, 1, 0],
+        [0, 2, 2, 2, 0],
+        [0, 1, 1, 1, 0],
+        [2, 2, 2, 2, 2],
+    ],
+]
+_NON_SPAWN_WEIGHTS = [1, 1]
+
+def _rotate_template_90(t):
+    rows, cols = len(t), len(t[0])
+    return [[t[rows - 1 - r][c] for r in range(rows)] for c in range(cols)]
+
+def _rotate_template(t, times: int):
+    for _ in range(times % 4):
+        t = _rotate_template_90(t)
+    return t
+
+def _place_template(grid, template, origin_col: int, origin_row: int, protected: set):
+    """
+    Stamp one template onto grid at (origin_col, origin_row).
+        1 → WALL
+        2 → EMPTY + add to protected
+        0 → leave as-is
+    """
+    for r, row in enumerate(template):
+        for c, val in enumerate(row):
+            gc = origin_col + c
+            gr = origin_row + r
+            if not (0 < gc < COLS - 1 and 0 < gr < ROWS - 1):
+                continue
+            if val == 1:
+                grid[gr][gc] = WALL
+            elif val == 2:
+                grid[gr][gc] = EMPTY
+                protected.add((gc, gr))
+
+def _can_place(grid, template, origin_col: int, origin_row: int, protected: set) -> bool:
+    """
+    Returns True only if every wall (1) or protected (2) cell in the template
+    maps to a currently empty, non-protected grid tile that is inside bounds.
+    """
+    for r, row in enumerate(template):
+        for c, val in enumerate(row):
+            if val == 0:
+                continue
+            gc = origin_col + c
+            gr = origin_row + r
+            if not (0 < gc < COLS - 1 and 0 < gr < ROWS - 1):
+                return False
+            if grid[gr][gc] == WALL:
+                return False
+            if (gc, gr) in protected:
+                return False
+    return True
+
+def _place_objects_in_quadrant(grid, templates, weights, count: int,
+                                qc: int, qr: int, qw: int, qh: int, protected: set):
+    """Attempt to place `count` objects randomly inside the quadrant."""
+    placed   = 0
+    attempts = 0
+    while placed < count and attempts < 300:
+        attempts += 1
+        tmpl = random.choices(templates, weights=weights, k=1)[0]
+        tmpl = [row[:] for row in tmpl]
+        tmpl = _rotate_template(tmpl, random.randint(0, 3))
+        t_h  = len(tmpl)
+        t_w  = len(tmpl[0]) if t_h > 0 else 0
+
+        max_dc = qw - t_w - 1
+        max_dr = qh - t_h - 1
+        if max_dc < 0 or max_dr < 0:
+            continue
+
+        off_c = random.randint(0, max_dc)
+        off_r = random.randint(0, max_dr)
+        abs_c = qc + off_c
+        abs_r = qr + off_r
+
+        if _can_place(grid, tmpl, abs_c, abs_r, protected):
+            _place_template(grid, tmpl, abs_c, abs_r, protected)
+            placed += 1
+
+def _clear_safe_zone(grid, cx: int, cy: int, radius: int = 1):
+    """Force-clear a square zone around a spawn point (doesn't touch borders)."""
+    for dr in range(-radius, radius + 1):
+        for dc in range(-radius, radius + 1):
+            r, c = cy + dr, cx + dc
+            if 0 < r < ROWS - 1 and 0 < c < COLS - 1:
+                grid[r][c] = EMPTY
+
 def generate_random_map():
-    grid = [[EMPTY for _ in range(COLS)] for _ in range(ROWS)]
+    grid = [[EMPTY] * COLS for _ in range(ROWS)]
 
-    # 1. Solid Borders
     for c in range(COLS):
         grid[0][c] = WALL
         grid[ROWS - 1][c] = WALL
@@ -101,33 +238,52 @@ def generate_random_map():
         grid[r][0] = WALL
         grid[r][COLS - 1] = WALL
 
-    # 2. Random internal walls
-    for _ in range(60):
-        r = random.randint(2, ROWS - 3)
-        c = random.randint(2, COLS - 3)
-        grid[r][c] = WALL
+    protected: set = set()
 
-    # 3. Carve out safe zones around spawns (3x3 clear area)
-    for sr, sc in [SPAWN1[::-1], SPAWN2[::-1]]:
-        for r in range(sr - 1, sr + 2):
-            for c in range(sc - 1, sc + 2):
-                if 0 < r < ROWS - 1 and 0 < c < COLS - 1:
-                    grid[r][c] = EMPTY
+    # TL — spawn corner
+    _place_objects_in_quadrant(
+        grid, _SPAWN_TEMPLATES, _SPAWN_WEIGHTS,
+        random.randint(4, 7),
+        1, 1, 11, 8, protected,
+    )
+    # TR — non-spawn
+    _place_objects_in_quadrant(
+        grid, _NON_SPAWN_TEMPLATES, _NON_SPAWN_WEIGHTS,
+        random.randint(2, 4),
+        13, 1, 11, 8, protected,
+    )
+    # BL — non-spawn
+    _place_objects_in_quadrant(
+        grid, _NON_SPAWN_TEMPLATES, _NON_SPAWN_WEIGHTS,
+        random.randint(2, 4),
+        1, 10, 11, 8, protected,
+    )
+    # BR — spawn corner
+    _place_objects_in_quadrant(
+        grid, _SPAWN_TEMPLATES, _SPAWN_WEIGHTS,
+        random.randint(4, 7),
+        13, 10, 11, 8, protected,
+    )
 
-    # 4. Place charge tiles — no two within 3x3 of each other
+    for sx, sy in [SPAWN1, SPAWN2]:
+        _clear_safe_zone(grid, sx, sy, radius=1)
+        for dr in range(-1, 2):
+            for dc in range(-1, 2):
+                protected.discard((sx + dc, sy + dr))
+
     charge_tiles = []
-    attempts = 0
+    attempts     = 0
     while len(charge_tiles) < 6 and attempts < 2000:
         attempts += 1
-        r = random.randint(2, ROWS - 3)
-        c = random.randint(2, COLS - 3)
+        r = random.randint(1, ROWS - 2)
+        c = random.randint(1, COLS - 2)
         if grid[r][c] != EMPTY:
+            continue
+        if (c, r) in protected:
             continue
         if (c, r) == SPAWN1 or (c, r) == SPAWN2:
             continue
-        # Check no existing charge tile is within 3x3 (chebyshev dist <= 2)
-        too_close = any(abs(c - ec) <= 2 and abs(r - er) <= 2 for (ec, er) in charge_tiles)
-        if too_close:
+        if any(abs(c - ec) <= 2 and abs(r - er) <= 2 for (ec, er) in charge_tiles):
             continue
         grid[r][c] = CHARGE_TILE
         charge_tiles.append((c, r))
@@ -191,7 +347,6 @@ class TankDebugGame:
         self.tank1 = Tank(SPAWN1[0], SPAWN1[1], UP, 1)
         self.tank2 = Tank(SPAWN2[0], SPAWN2[1], DOWN, 2)
 
-    # ── movement & shooting ───────────────────────────────────────────────────
     def is_walkable(self, x, y):
         if x < 0 or x >= COLS or y < 0 or y >= ROWS:
             return False
@@ -201,7 +356,6 @@ class TankDebugGame:
         nx = tank.x + DX[tank.direction]
         ny = tank.y + DY[tank.direction]
         if self.is_walkable(nx, ny):
-            # Block if the other tank is already on that tile
             other = self.tank2 if tank.player_id == 1 else self.tank1
             if other.alive and other.x == nx and other.y == ny:
                 return
@@ -223,21 +377,25 @@ class TankDebugGame:
         tank.ammo -= 1
         tank.cooldown = SHOOT_COOLDOWN
 
-    def plant_mine(self, tank):
-        if tank.mines > 0:
-            # Check if a mine already exists on this exact tile
-            if not any(m.x == tank.x and m.y == tank.y for m in self.active_mines):
-                self.active_mines.append(Mine(tank.x, tank.y, tank.player_id))
-                tank.mines -= 1
+    def plant_mine(self, tank) -> bool:
+        if tank.mines <= 0:
+            return False
+        active_count = sum(1 for m in self.active_mines if m.owner_id == tank.player_id)
+        if active_count >= MAX_MINES:
+            return False
+        if any(m.x == tank.x and m.y == tank.y for m in self.active_mines):
+            return False
+        self.active_mines.append(Mine(tank.x, tank.y, tank.player_id))
+        tank.mines -= 1
+        return True
 
-    # ── charge tile logic ─────────────────────────────────────────────────────
     def _update_charge(self, tank):
         tx, ty = tank.x, tank.y
         if self.grid[ty][tx] == CHARGE_TILE:
             tank.charge_progress += 1
             if tank.charge_progress >= CHARGE_TICKS:
                 tank.ammo = MAX_AMMO
-                tank.mines = min(MAX_MINES, tank.mines + 1)  # Refill 1 mine optionally
+                tank.mines = min(MAX_MINES, tank.mines + 1)
                 tank.charge_progress = 0
                 self.grid[ty][tx] = EMPTY
                 if (tx, ty) in self.charge_tiles:
@@ -245,15 +403,21 @@ class TankDebugGame:
         else:
             tank.charge_progress = 0
 
-    # ── step ──────────────────────────────────────────────────────────────────
     def step(self, action1, action2):
         if self.done:
             return
 
         self.ticks += 1
 
-        self._apply_action(self.tank1, action1)
-        self._apply_action(self.tank2, action2)
+        mine1 = self._apply_action(self.tank1, action1)
+        mine2 = self._apply_action(self.tank2, action2)
+
+        # Optional debug tracking of bad mines, though game_2a doesn't strictly need RL rewards
+        enemy_dist = (abs(self.tank1.x - self.tank2.x) + abs(self.tank1.y - self.tank2.y))
+        if mine1 and enemy_dist > MINE_PENALTY_RANGE:
+            pass  # RL penalty would go here
+        if mine2 and enemy_dist > MINE_PENALTY_RANGE:
+            pass  # RL penalty would go here
 
         if self.tank1.cooldown > 0: self.tank1.cooldown -= 1
         if self.tank2.cooldown > 0: self.tank2.cooldown -= 1
@@ -264,9 +428,9 @@ class TankDebugGame:
         self._check_mines()
         self._check_done()
 
-    def _apply_action(self, tank, action):
+    def _apply_action(self, tank, action) -> bool:
         if not tank.alive:
-            return
+            return False
         if action == 0:
             self.rotate(tank, clockwise=False)
         elif action == 1:
@@ -276,8 +440,8 @@ class TankDebugGame:
         elif action == 3:
             self.shoot(tank)
         elif action == 5:
-            self.plant_mine(tank)  # 5 = plant mine
-        # 4 = stay
+            return self.plant_mine(tank)
+        return False
 
     def _update_bullets(self):
         alive = []
@@ -303,23 +467,20 @@ class TankDebugGame:
 
             b.x, b.y = float(nx), float(ny)
 
-            # Check bullet hitting a mine
             mine_hit = False
             for m in self.active_mines:
                 if int(b.x) == m.x and int(b.y) == m.y:
                     m.health -= 1
                     mine_hit = True
                     if m.health <= 0:
-                        # Mine destroyed — refund to owner
                         owner = self.tank1 if m.owner_id == 1 else self.tank2
                         owner.mines = min(MAX_MINES, owner.mines + 1)
                         self.active_mines.remove(m)
-                    break  # bullet consumed by mine hit
+                    break
 
             if mine_hit:
-                continue  # bullet stops at mine
+                continue
 
-            # Check bullet hitting a tank
             hit = False
             for tank in [self.tank1, self.tank2]:
                 if not tank.alive: continue
@@ -335,7 +496,6 @@ class TankDebugGame:
         self.bullets = alive
 
     def _check_mines(self):
-        """3x3 core = damage + mine consumed (refunded to owner). 4th ring = detection only. Owner immune."""
         surviving_mines = []
         for m in self.active_mines:
             triggered = False
@@ -343,17 +503,15 @@ class TankDebugGame:
                 if not tank.alive:
                     continue
                 if tank.player_id == m.owner_id:
-                    continue  # owner immune
+                    continue
                 dx = abs(tank.x - m.x)
                 dy = abs(tank.y - m.y)
                 if dx <= 1 and dy <= 1:
                     tank.health -= 2
                     triggered = True
-                    # Refund mine to owner on successful trigger
                     owner = self.tank1 if m.owner_id == 1 else self.tank2
                     owner.mines = min(MAX_MINES, owner.mines + 1)
                     break
-                # 4th ring (chebyshev dist 2): no damage, mine stays
             if not triggered:
                 surviving_mines.append(m)
         self.active_mines = surviving_mines
@@ -381,7 +539,6 @@ class TankDebugGame:
         self.result_timer = RESET_DELAY
 
     def new_episode(self):
-        """Generate new map and reset entities."""
         self.grid, self.charge_tiles = generate_random_map()
         self._spawn_tanks()
         self.bullets = []
@@ -393,7 +550,6 @@ class TankDebugGame:
         self.episode += 1
 
     def full_reset(self):
-        """Hard reset scores and trigger new episode."""
         self.score1 = self.score2 = 0
         self.kills1 = self.kills2 = 0
         self.deaths1 = self.deaths2 = 0
@@ -433,20 +589,16 @@ def draw_tank(surf, tank, tile, is_player):
     body_c = C_P1 if is_player else C_P2
     dark_c = C_P1_DARK if is_player else C_P2_DARK
 
-    # Shadow
     shadow_surf = pygame.Surface((tile - 4, tile - 4), pygame.SRCALPHA)
     shadow_surf.fill((0, 0, 0, 80))
     surf.blit(shadow_surf, (cx - tile // 2 + 3, cy - tile // 2 + 3))
 
-    # Body
     body_rect = pygame.Rect(cx - tile // 2 + 1, cy - tile // 2 + 1, tile - 2, tile - 2)
     pygame.draw.rect(surf, dark_c, body_rect, border_radius=4)
     pygame.draw.rect(surf, body_c, body_rect.inflate(-4, -4), border_radius=3)
 
-    # Direction arrow
     draw_arrow(surf, (255, 255, 255), cx, cy, tank.direction, size=tile * 0.28)
 
-    # Health pips
     pip_w = 5
     pip_gap = 2
     total = MAX_HEALTH * (pip_w + pip_gap) - pip_gap
@@ -456,7 +608,6 @@ def draw_tank(surf, tank, tile, is_player):
         color = body_c if i < tank.health else (40, 40, 50)
         pygame.draw.rect(surf, color, (px + i * (pip_w + pip_gap), py, pip_w, 4))
 
-    # Ammo pips (row below health pips)
     ammo_total = MAX_AMMO * (pip_w + pip_gap) - pip_gap
     apx = cx - ammo_total // 2
     apy = py + 7
@@ -464,7 +615,6 @@ def draw_tank(surf, tank, tile, is_player):
         color = C_CHARGE_GLOW if i < tank.ammo else (40, 40, 50)
         pygame.draw.rect(surf, color, (apx + i * (pip_w + pip_gap), apy, pip_w, 3))
 
-    # Charging indicator ring
     if tank.charge_progress > 0:
         frac = tank.charge_progress / CHARGE_TICKS
         pygame.draw.arc(surf, C_CHARGE_GLOW,
@@ -485,17 +635,15 @@ def draw_mine(surf, mine, tile):
     cy = int(mine.y * tile + tile // 2)
     color = C_MINE_P1 if mine.owner_id == 1 else C_MINE_P2
 
-    # 4th ring (5x5 area) — grey warning, no damage zone
     r4x = max(0, (mine.x - 2) * tile)
     r4y = max(0, (mine.y - 2) * tile)
     r4w = min(ARENA_W, (mine.x + 3) * tile) - r4x
     r4h = min(ARENA_H, (mine.y + 3) * tile) - r4y
     ring4_surf = pygame.Surface((r4w, r4h), pygame.SRCALPHA)
-    ring4_surf.fill((100, 100, 100, 12))  # grey, very faint
+    ring4_surf.fill((100, 100, 100, 12))
     surf.blit(ring4_surf, (r4x, r4y))
     pygame.draw.rect(surf, (100, 100, 100, 35), pygame.Rect(r4x, r4y, r4w, r4h), 1)
 
-    # 3x3 core — actual damage zone, team color tint
     zx = max(0, (mine.x - 1) * tile)
     zy = max(0, (mine.y - 1) * tile)
     zw = min(ARENA_W, (mine.x + 2) * tile) - zx
@@ -505,7 +653,6 @@ def draw_mine(surf, mine, tile):
     surf.blit(zone_surf, (zx, zy))
     pygame.draw.rect(surf, (*color, 55), pygame.Rect(zx, zy, zw, zh), 1)
 
-    # Central mine icon
     pygame.draw.circle(surf, color, (cx, cy), 6)
     pygame.draw.circle(surf, (255, 255, 255), (cx, cy), 2)
 
@@ -568,7 +715,6 @@ def draw_hud(surf, game, hud_rect, font_md, font_sm, font_xs):
     line("Debug Window", C_TEXT_DIM, gap=14)
     sep()
 
-    # Player 1
     line("── PLAYER 1 (YOU) ──", C_P1, gap=4, font=font_sm)
     line(f"  Health   {'█' * game.tank1.health}{'░' * (MAX_HEALTH - game.tank1.health)}", C_P1)
     line(f"  Ammo     {'◆' * game.tank1.ammo}{'◇' * (MAX_AMMO - game.tank1.ammo)}", C_CHARGE_GLOW)
@@ -578,7 +724,6 @@ def draw_hud(surf, game, hud_rect, font_md, font_sm, font_xs):
     line(f"  Facing   {DIR_NAMES[game.tank1.direction]}", C_TEXT_SEC)
     line(f"  Cooldown {game.tank1.cooldown:>3}", C_TEXT_SEC, gap=10)
 
-    # Bot
     line("── BOT (P2) ─────────", C_P2, gap=4, font=font_sm)
     line(f"  Health   {'█' * game.tank2.health}{'░' * (MAX_HEALTH - game.tank2.health)}", C_P2)
     line(f"  Ammo     {'◆' * game.tank2.ammo}{'◇' * (MAX_AMMO - game.tank2.ammo)}", C_CHARGE_GLOW)
@@ -667,7 +812,7 @@ def main():
                 elif event.key == pygame.K_d:
                     player_action = 1
                 elif event.key == pygame.K_e:
-                    player_action = 5  # Plant mine
+                    player_action = 5
 
         if not running:
             break
