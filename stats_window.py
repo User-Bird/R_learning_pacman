@@ -148,7 +148,7 @@ def draw_reward_chart(surf, rect, history, reward_color, wr_color,
 
     # Title
     label_surf = font_xs.render(
-        f"BEST {player_label}  —  reward (fill) · win-rate (line)",
+        f"AVERAGE {player_label}  —  reward (fill) · win-rate (line)",
         True, reward_color
     )
     surf.blit(label_surf, (rect.left + PAD_L, rect.top + 4))
@@ -159,6 +159,9 @@ def draw_reward_chart(surf, rect, history, reward_color, wr_color,
                   (rect.centerx - waiting.get_width()//2,
                    rect.centery - waiting.get_height()//2))
         return
+
+    # ── THE FIX: Sort by episode in case any out-of-order points slipped through
+    history = sorted(history, key=lambda p: p[0])
 
     episodes  = [p[0] for p in history]
     rewards   = [p[1] for p in history]

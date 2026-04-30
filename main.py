@@ -233,7 +233,9 @@ def main():
 
     # ── Reward History for Live Charts
     reward_history = {"p1": [], "p2": []}
-    HISTORY_MAX_LEN = 1500  # Prevent memory leak over extremely long runs
+    total_episodes_last_recorded = 0
+    RECORD_EVERY_N_EPISODES = 6
+    HISTORY_MAX_LEN = 1500
 
     C_BG = (10, 12, 16)
 
@@ -265,26 +267,29 @@ def main():
 
                 # If an episode just ended, record stats for the charts
                 if episode_ended:
-                    for pid, key in ((1, "p1"), (2, "p2")):
-                        best_ep    = -1
-                        best_wr    = -1.0
-                        best_avg_r = 0.0
+                    total_eps = sum(sess.episodes for sess in sessions)
 
-                        # Find the best agent right now
-                        for sess in sessions:
-                            if sess.episodes == 0:
+                    # Only record a point every N total episodes to avoid spam
+                    if total_eps - total_episodes_last_recorded >= RECORD_EVERY_N_EPISODES:
+                        total_episodes_last_recorded = total_eps
+
+                        for pid, key in ((1, "p1"), (2, "p2")):
+                            active = [sess for sess in sessions if sess.episodes > 0]
+                            if not active:
                                 continue
-                            wins = sess.wins_p1 if pid == 1 else sess.wins_p2
-                            wr   = wins / sess.episodes
-                            avg_r = sess.last_ep_reward_p1 if pid == 1 else sess.last_ep_reward_p2
 
-                            if wr > best_wr or (wr == best_wr and best_ep < sess.episodes):
-                                best_wr    = wr
-                                best_avg_r = avg_r
-                                best_ep    = sess.episodes
+                            # Average reward and win-rate across all active sessions
+                            avg_r  = sum(
+                                (sess.last_ep_reward_p1 if pid == 1 else sess.last_ep_reward_p2)
+                                for sess in active
+                            ) / len(active)
 
-                        if best_ep > 0:
-                            reward_history[key].append([best_ep, best_avg_r, best_wr])
+                            avg_wr = sum(
+                                (sess.wins_p1 if pid == 1 else sess.wins_p2) / sess.episodes
+                                for sess in active
+                            ) / len(active)
+
+                            reward_history[key].append([total_eps, avg_r, avg_wr])
                             if len(reward_history[key]) > HISTORY_MAX_LEN:
                                 reward_history[key].pop(0)
 
@@ -332,7 +337,7 @@ def main():
                 tps=measured_tps,
                 fps=measured_fps,
                 session_mode=session_mode,
-                reward_history=reward_history  # <--- Added to pass data to stats window
+                reward_history=reward_history
             )
             last_stats_write = now
 
