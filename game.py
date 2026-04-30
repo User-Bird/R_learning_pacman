@@ -48,9 +48,9 @@ R_CHARGE_PICKUP  =  10.0
 R_TIME_PENALTY   =  -1.0
 
 MINE_PENALTY_RANGE = 7
-R_STUPID_MINE      = -40.0   # Increased penalty to stop early mine dumping
+R_STUPID_MINE      = -40.0   # Penalty to stop early mine dumping
 R_CLOSER_ENEMY     =  0.5    # Reward for moving towards enemy
-R_FACING_ENEMY     =  0.3    # Reward for pointing at enemy
+R_FACING_ENEMY     =  0.1    # Lowered to prevent sit-and-stare farming
 
 # ── Templates + Helpers ────────────────────────────────────────────────────────
 
@@ -192,25 +192,32 @@ class TankGame:
         self.ticks += 1
         rewards = [R_TIME_PENALTY, R_TIME_PENALTY]
 
-        # Pre-action distance tracking for shaping
-        dist_before = abs(self.tank1.x - self.tank2.x) + abs(self.tank1.y - self.tank2.y)
+        # ── Pre-action state for per-agent distance tracking ───────────────────
+        pos1_before = (self.tank1.x, self.tank1.y)
+        pos2_before = (self.tank2.x, self.tank2.y)
 
         # ── actions ────────────────────────────────────────────────────────────
         mine1 = self._apply_action(self.tank1, actions[0])
         mine2 = self._apply_action(self.tank2, actions[1])
 
-        # ── Reward Shaping: Movement and Facing ────────────────────────────────
-        dist_after = abs(self.tank1.x - self.tank2.x) + abs(self.tank1.y - self.tank2.y)
+        # ── Reward Shaping: Movement ───────────────────────────────────────────
+        dist1_before = abs(pos1_before[0] - self.tank2.x) + abs(pos1_before[1] - self.tank2.y)
+        dist1_after  = abs(self.tank1.x   - self.tank2.x) + abs(self.tank1.y   - self.tank2.y)
 
-        if actions[0] == 2 and dist_after < dist_before: rewards[0] += R_CLOSER_ENEMY
-        if actions[1] == 2 and dist_after < dist_before: rewards[1] += R_CLOSER_ENEMY
+        dist2_before = abs(self.tank1.x   - pos2_before[0]) + abs(self.tank1.y - pos2_before[1])
+        dist2_after  = abs(self.tank1.x   - self.tank2.x) + abs(self.tank1.y   - self.tank2.y)
 
-        if self._is_facing(self.tank1, self.tank2): rewards[0] += R_FACING_ENEMY
-        if self._is_facing(self.tank2, self.tank1): rewards[1] += R_FACING_ENEMY
+        if actions[0] == 2 and dist1_after < dist1_before: rewards[0] += R_CLOSER_ENEMY
+        if actions[1] == 2 and dist2_after < dist2_before: rewards[1] += R_CLOSER_ENEMY
+
+        # ── Reward Shaping: Facing ─────────────────────────────────────────────
+        # Only reward facing if they are actually taking a non-stay action (action != 4)
+        if actions[0] != 4 and self._is_facing(self.tank1, self.tank2): rewards[0] += R_FACING_ENEMY
+        if actions[1] != 4 and self._is_facing(self.tank2, self.tank1): rewards[1] += R_FACING_ENEMY
 
         # ── mine stupidity penalty ────────────────────────────────────────────
-        if mine1 and dist_after > MINE_PENALTY_RANGE: rewards[0] += R_STUPID_MINE
-        if mine2 and dist_after > MINE_PENALTY_RANGE: rewards[1] += R_STUPID_MINE
+        if mine1 and dist1_after > MINE_PENALTY_RANGE: rewards[0] += R_STUPID_MINE
+        if mine2 and dist2_after > MINE_PENALTY_RANGE: rewards[1] += R_STUPID_MINE
 
         # ── cooldowns & charge ────────────────────────────────────────────────
         if self.tank1.cooldown > 0: self.tank1.cooldown -= 1
