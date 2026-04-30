@@ -40,8 +40,10 @@ class Trainer:
         self.target_net.eval()
 
         self.optimizer = torch.optim.Adam(self.online_net.parameters(), lr=LR)
-        self.loss_fn   = nn.MSELoss()
-        self.buffer    = ReplayBuffer(BUFFER_CAPACITY)
+
+        self.loss_fn = nn.SmoothL1Loss()
+
+        self.buffer = ReplayBuffer(BUFFER_CAPACITY)
 
         self.epsilon   = EPSILON_START
         self._tick     = 0

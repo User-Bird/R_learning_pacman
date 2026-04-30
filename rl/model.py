@@ -1,21 +1,12 @@
 """
 rl/model.py  ─  Phase 4: DQN Neural Network
 ─────────────────────────────────────────────
-Architecture:
-    Linear(77 → 128) + ReLU
-    Linear(128 → 128) + ReLU
-    Linear(128 → 6)   ← Q-value per action
-
-Also contains DQNModel.save() / load() helpers.
 """
-
 import torch
 import torch.nn as nn
 
-
-STATE_SIZE  = 77
+STATE_SIZE  = 79
 ACTION_SIZE = 6
-
 
 class DQNModel(nn.Module):
     def __init__(self):
@@ -29,10 +20,6 @@ class DQNModel(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x : (batch, 77) float32 tensor
-        returns : (batch, 6) Q-values
-        """
         return self.net(x)
 
     def save(self, path: str):
