@@ -18,7 +18,11 @@ from renderer import draw_game
 
 # ── NEW IMPORTS ────────────────────────────────────────────────────────────────
 from stats_io import write_stats, write_shutdown, clear_stats
-from agent_selector import show_session_mode_picker, save_agents
+from agent_selector import (
+    show_session_mode_picker,
+    save_agents,
+    show_save_and_close_dialog,   # ← new
+)
 
 
 # ── Session Wrapper ────────────────────────────────────────────────────────────
@@ -33,24 +37,36 @@ class Session:
         self.trainer1 = Trainer()
         self.trainer2 = Trainer()
 
-        # ── LOAD SAVED AGENTS LOGIC ───────────────────────────────────────────
-        if session_mode == "NEW_VS_AGENT" and agent2_path:
-            self.trainer2.load_checkpoint(agent2_path)
-
-        elif session_mode == "AGENT_VS_AGENT":
-            if agent1_path:
-                self.trainer1.load_checkpoint(agent1_path)
-            if agent2_path:
-                self.trainer2.load_checkpoint(agent2_path)
-        # ──────────────────────────────────────────────────────────────────────
-
-        self.agent1 = DQNAgent(self.trainer1)
-        self.agent2 = DQNAgent(self.trainer2)
-
+        # Initialize tracking vars before loading so we can overwrite them if needed
         self.episodes = 0
         self.wins_p1 = 0
         self.wins_p2 = 0
         self.ticks = 0
+
+        # ── LOAD SAVED AGENTS LOGIC ───────────────────────────────────────────
+        if session_mode == "NEW_VS_AGENT" and agent2_path:
+            ckpt = self.trainer2.load_checkpoint(agent2_path)
+            if ckpt:
+                # Restore episode and win counts so the display picks up from
+                # where the agent left off instead of showing 0 every time.
+                self.episodes = ckpt.get("episodes", 0)
+                self.wins_p2  = ckpt.get("wins",     0)
+
+        elif session_mode == "AGENT_VS_AGENT":
+            if agent1_path:
+                ckpt1 = self.trainer1.load_checkpoint(agent1_path)
+                if ckpt1:
+                    self.episodes = max(self.episodes, ckpt1.get("episodes", 0))
+                    self.wins_p1  = ckpt1.get("wins",     0)
+            if agent2_path:
+                ckpt2 = self.trainer2.load_checkpoint(agent2_path)
+                if ckpt2:
+                    self.episodes = max(self.episodes, ckpt2.get("episodes", 0))
+                    self.wins_p2  = ckpt2.get("wins",     0)
+        # ──────────────────────────────────────────────────────────────────────
+
+        self.agent1 = DQNAgent(self.trainer1)
+        self.agent2 = DQNAgent(self.trainer2)
 
         self.states = self.game.reset()
 
@@ -123,6 +139,21 @@ def draw_buttons(screen, current_mode, rects):
         txt = font.render(mode, True, (255, 255, 255))
         screen.blit(txt, (rect.centerx - txt.get_width() // 2, rect.centery - txt.get_height() // 2))
 
+def draw_save_close_btn(screen, btn_rect, font, mouse_pos):
+    """Draws the new Save & Close button with hover effects."""
+    C_BTN_SAVE = (40, 150, 140)  # A neat teal color
+    hover = btn_rect.collidepoint(mouse_pos)
+    col = tuple(min(255, c + 30) for c in C_BTN_SAVE) if hover else C_BTN_SAVE
+
+    pygame.draw.rect(screen, col, btn_rect, border_radius=6)
+    pygame.draw.rect(screen, (40, 40, 60), btn_rect, 1, border_radius=6)
+
+    lbl = font.render("Save & Close", True, (210, 208, 200))
+    screen.blit(lbl, (
+        btn_rect.centerx - lbl.get_width()  // 2,
+        btn_rect.centery - lbl.get_height() // 2,
+    ))
+
 # ── Main Loop ──────────────────────────────────────────────────────────────────
 
 def main():
@@ -164,6 +195,15 @@ def main():
     rect_headless = pygame.Rect(bx_start + 2 * (bw + 20), by, bw, bh)
     btn_rects = [rect_watch, rect_fast, rect_headless]
 
+    # ── Save & Close button geometry ──────────────────────────────────────────
+    BTN_SC_W, BTN_SC_H = 160, 40
+    btn_save_close = pygame.Rect(
+        W - BTN_SC_W - 20,  # Positioned at the bottom right corner
+        by,
+        BTN_SC_W,
+        BTN_SC_H,
+    )
+
     current_mode = "WATCH"
 
     # ── Tracking state
@@ -179,6 +219,8 @@ def main():
 
     running = True
     while running:
+        mouse_pos = pygame.mouse.get_pos()
+
         # 1. Events (always poll every frame, even in headless!)
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -189,6 +231,12 @@ def main():
                 if rect_watch.collidepoint(event.pos): current_mode = "WATCH"
                 elif rect_fast.collidepoint(event.pos): current_mode = "FAST"
                 elif rect_headless.collidepoint(event.pos): current_mode = "HEADLESS"
+                elif btn_save_close.collidepoint(event.pos):
+                    # Open the named-save dialog. It blocks until user saves or cancels.
+                    saved = show_save_and_close_dialog(screen, fonts, sessions, session_mode)
+                    if saved:
+                        print(f"[main] saved as: {saved}")
+                        running = False   # close the window after a successful save
 
         # 2. Step Games
         n_ticks = {"WATCH": 1, "FAST": 50, "HEADLESS": 200}[current_mode]
@@ -202,6 +250,7 @@ def main():
             screen.fill(C_BG)
             draw_all_games(screen, sessions, TILE)
             draw_buttons(screen, current_mode, btn_rects)
+            draw_save_close_btn(screen, btn_save_close, font_sm, mouse_pos)
             pygame.display.flip()
 
         elif current_mode == "FAST":
@@ -209,12 +258,14 @@ def main():
                 screen.fill(C_BG)
                 draw_all_games(screen, sessions, TILE)
                 draw_buttons(screen, current_mode, btn_rects)
+                draw_save_close_btn(screen, btn_save_close, font_sm, mouse_pos)
                 pygame.display.flip()
 
         else:  # HEADLESS
             if frame_count % 30 == 0:
                 screen.fill(C_BG)
                 draw_buttons(screen, current_mode, btn_rects)
+                draw_save_close_btn(screen, btn_save_close, font_sm, mouse_pos)
                 font = pygame.font.SysFont("consolas", 24, bold=True)
                 txt = font.render("HEADLESS MODE ACTIVE - RENDERING PAUSED", True, (160, 80, 240))
                 screen.blit(txt, (W // 2 - txt.get_width() // 2, H // 2 - txt.get_height() // 2))

@@ -7,6 +7,11 @@ Provides:
 
   save_agents(sessions, session_mode)  →  list of saved filenames
 
+  show_save_and_close_dialog(screen, fonts, sessions, session_mode)
+      →  saved filename (str) | None if cancelled
+      Shows a named-save dialog for the best P2 agent, displaying
+      current ε, wins, and episodes next to the name input field.
+
 What gets saved per mode
 ────────────────────────
   NEW_VS_NEW     → best agent across all 6 games (1 file)
@@ -18,6 +23,7 @@ Each .pt file is a full checkpoint dict:
 
 Call show_session_mode_picker() before starting the main loop.
 Call save_agents() in your shutdown sequence after pygame.quit().
+Call show_save_and_close_dialog() when the "Save & Close" button is pressed.
 """
 
 import os
@@ -41,6 +47,9 @@ C_BTN_NVA    = (200, 130,  40)
 C_BTN_AVA    = (160,  60, 200)
 C_BTN_OK     = (40,  160,  80)
 C_BTN_CANCEL = (160,  40,  40)
+C_BTN_SAVE   = (40,  160, 200)   # distinct teal for the "Save & Close" button
+C_STAT_GOOD  = (100, 220, 140)
+C_STAT_WARN  = (220, 180,  60)
 
 AGENTS_DIR   = "saved_agents"    # folder where .pt files live
 
@@ -58,11 +67,15 @@ def _list_agents() -> list[str]:
     return sorted([os.path.basename(f) for f in files])
 
 
-def _draw_btn(surf, font, text, rect, color, hover=False):
-    col = tuple(min(255, c + 30) for c in color) if hover else color
+def _draw_btn(surf, font, text, rect, color, hover=False, disabled=False):
+    if disabled:
+        col = tuple(c // 3 for c in color)
+    else:
+        col = tuple(min(255, c + 30) for c in color) if hover else color
     pygame.draw.rect(surf, col, rect, border_radius=6)
     pygame.draw.rect(surf, C_BORDER, rect, 1, border_radius=6)
-    t = font.render(text, True, C_TEXT_PRI)
+    t_col = C_TEXT_DIM if disabled else C_TEXT_PRI
+    t = font.render(text, True, t_col)
     surf.blit(t, (rect.centerx - t.get_width()//2,
                   rect.centery - t.get_height()//2))
 
@@ -327,6 +340,233 @@ def _save_one(trainer, ep: int, wins: int, wr: float,
     return fname
 
 
+def _save_with_name(trainer, ep: int, wins: int, wr: float,
+                    player_id: int, session_mode: str, name: str) -> str:
+    """
+    Save a full checkpoint with a user-supplied name.
+
+    Filename:  saved_agents/{name}_p{player_id}_ep{N}_e{eps:.3f}_w{wins}.pt
+    The stats are baked into the filename so you can see them in the picker
+    without loading the file.
+    """
+    _ensure_agents_dir()
+    eps   = trainer.epsilon
+    # Sanitise: replace spaces/slashes with underscores, strip unsafe chars
+    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+    safe_name = safe_name[:32]   # cap length
+    fname = f"{safe_name}_p{player_id}_ep{ep}_e{eps:.3f}_w{wins}.pt"
+    fpath = os.path.join(AGENTS_DIR, fname)
+
+    trainer.save_checkpoint(fpath, extra_info={
+        "episodes":     ep,
+        "wins":         wins,
+        "win_rate":     wr,
+        "player":       player_id,
+        "session_mode": session_mode,
+        "saved_at":     datetime.datetime.now().isoformat(),
+        "agent_name":   safe_name,
+    })
+    print(f"[save] '{safe_name}' P{player_id} → {fpath}  "
+          f"(win-rate {wr:.2%}, ε={eps:.4f}, ep={ep})")
+    return fname
+
+
+# ── NEW: Save & Close dialog ──────────────────────────────────────────────────
+
+def show_save_and_close_dialog(screen, fonts, sessions, session_mode: str) -> str | None:
+    """
+    Show a modal dialog that lets the user name and save the best P2 agent,
+    displaying its current ε, wins, and episode count right next to the input.
+
+    Call this when the "Save & Close" button is pressed in main.py.
+    After it returns, set running = False to exit the main loop.
+
+    Returns
+    -------
+    str   – saved filename (basename only) on success
+    None  – if the user cancelled or there were no episodes to save
+    """
+    font_md, font_sm, font_xs = fonts
+    W, H = screen.get_size()
+
+    # ── Find best P2 ──────────────────────────────────────────────────────────
+    result = _find_best(sessions, 2)
+    if result is None:
+        # No episodes at all — show a brief "nothing to save" notice
+        _show_notice(screen, fonts, "No episodes played yet — nothing to save.")
+        return None
+
+    _, trainer, ep, wins, wr = result
+    eps = trainer.epsilon
+
+    # ── Layout ───────────────────────────────────────────────────────────────
+    DW, DH = 480, 290
+    dx = (W - DW) // 2
+    dy = (H - DH) // 2
+    dlg = pygame.Rect(dx, dy, DW, DH)
+
+    # Stats block sits in the upper portion
+    stats_top = dy + 50
+
+    # Name input below stats
+    label_y    = stats_top + 100
+    input_rect = pygame.Rect(dx + 14, label_y + 22, DW - 28, 36)
+
+    btn_save   = pygame.Rect(dx + 14,              dy + DH - 50,
+                             (DW - 42) // 2, 34)
+    btn_cancel = pygame.Rect(btn_save.right + 14,  dy + DH - 50,
+                             (DW - 42) // 2, 34)
+
+    # ── State ─────────────────────────────────────────────────────────────────
+    user_text = ""
+    MAX_LEN   = 28
+    clock     = pygame.time.Clock()
+
+    while True:
+        mouse = pygame.mouse.get_pos()
+        can_save = bool(user_text.strip())
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return None
+
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    return None
+
+                elif event.key == pygame.K_RETURN and can_save:
+                    return _save_with_name(
+                        trainer, ep, wins, wr, 2, session_mode,
+                        user_text.strip()
+                    )
+
+                elif event.key == pygame.K_BACKSPACE:
+                    user_text = user_text[:-1]
+
+                elif len(user_text) < MAX_LEN:
+                    ch = event.unicode
+                    # Accept letters, digits, spaces, hyphens
+                    if ch and (ch.isalnum() or ch in " -_"):
+                        user_text += ch
+
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if btn_cancel.collidepoint(mouse):
+                    return None
+                if btn_save.collidepoint(mouse) and can_save:
+                    return _save_with_name(
+                        trainer, ep, wins, wr, 2, session_mode,
+                        user_text.strip()
+                    )
+
+        # ── Draw ──────────────────────────────────────────────────────────────
+        overlay = pygame.Surface((W, H), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 170))
+        screen.blit(overlay, (0, 0))
+
+        pygame.draw.rect(screen, C_BG,     dlg, border_radius=10)
+        pygame.draw.rect(screen, C_BORDER, dlg, 1, border_radius=10)
+
+        # Title
+        ttl = font_md.render("SAVE BEST P2 AGENT", True, C_TEXT_PRI)
+        screen.blit(ttl, (dlg.centerx - ttl.get_width() // 2, dy + 14))
+
+        # Divider
+        pygame.draw.line(screen, C_BORDER,
+                         (dx + 14, dy + 38), (dx + DW - 14, dy + 38), 1)
+
+        # ── Stats block ───────────────────────────────────────────────────────
+        # Labels on the left, values on the right in a neat two-column layout
+        col_label = dx + 24
+        col_value = dx + 160
+        sy = stats_top
+
+        def _stat_row(label, value, value_color=C_TEXT_PRI):
+            nonlocal sy
+            tl = font_xs.render(label, True, C_TEXT_DIM)
+            tv = font_sm.render(value, True, value_color)
+            screen.blit(tl, (col_label, sy))
+            screen.blit(tv, (col_value, sy - 1))
+            sy += tl.get_height() + 8
+
+        # Epsilon colour: green = still learning, yellow = near floor
+        eps_col = C_STAT_GOOD if eps > 0.15 else C_STAT_WARN
+        wr_col  = C_STAT_GOOD if wr >= 0.5  else C_STAT_WARN
+
+        _stat_row("Episodes played:",  f"{ep:,}")
+        _stat_row("Wins (P2):",        f"{wins:,}  ({wr:.1%})",  wr_col)
+        _stat_row("Current  ε:",       f"{eps:.4f}",             eps_col)
+        _stat_row("Tick count:",       f"{trainer._tick:,}")
+
+        # ── Name input ────────────────────────────────────────────────────────
+        lbl = font_xs.render("Name for this agent:", True, C_TEXT_SEC)
+        screen.blit(lbl, (dx + 14, label_y))
+
+        # Input box
+        border_col = C_SELECT   # always active (only input in dialog)
+        pygame.draw.rect(screen, C_PANEL_BG, input_rect, border_radius=5)
+        pygame.draw.rect(screen, border_col, input_rect, 1, border_radius=5)
+
+        cursor = "|" if (pygame.time.get_ticks() // 500) % 2 == 0 else " "
+        display_text = user_text + cursor
+        txt_surf = font_sm.render(display_text, True, C_TEXT_PRI)
+        screen.blit(txt_surf,
+                    (input_rect.left + 8,
+                     input_rect.centery - txt_surf.get_height() // 2))
+
+        # Character counter
+        cc = font_xs.render(f"{len(user_text)}/{MAX_LEN}", True, C_TEXT_DIM)
+        screen.blit(cc, (input_rect.right - cc.get_width() - 6,
+                         input_rect.bottom + 3))
+
+        # Preview of what the filename will look like
+        if user_text.strip():
+            safe = "".join(c if c.isalnum() or c in "-_" else "_"
+                           for c in user_text.strip())[:32]
+            preview = f"→ {safe}_p2_ep{ep}_e{eps:.3f}_w{wins}.pt"
+        else:
+            preview = "→ enter a name above"
+        pv = font_xs.render(preview, True, C_TEXT_DIM)
+        screen.blit(pv, (dx + 14, input_rect.bottom + 20))
+
+        # ── Buttons ───────────────────────────────────────────────────────────
+        _draw_btn(screen, font_sm, "Save & Close", btn_save,
+                  C_BTN_SAVE, btn_save.collidepoint(mouse),
+                  disabled=not can_save)
+        _draw_btn(screen, font_sm, "Cancel",       btn_cancel,
+                  C_BTN_CANCEL, btn_cancel.collidepoint(mouse))
+
+        pygame.display.flip()
+        clock.tick(30)
+
+
+def _show_notice(screen, fonts, message: str, duration_ms: int = 2000):
+    """Brief centred notice overlay — auto-dismisses after duration_ms."""
+    font_md, font_sm, font_xs = fonts
+    W, H = screen.get_size()
+    start = pygame.time.get_ticks()
+    clock = pygame.time.Clock()
+
+    while pygame.time.get_ticks() - start < duration_ms:
+        for event in pygame.event.get():
+            if event.type in (pygame.QUIT, pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
+                return
+
+        overlay = pygame.Surface((W, H), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 160))
+        screen.blit(overlay, (0, 0))
+
+        t = font_sm.render(message, True, C_TEXT_PRI)
+        bx = W // 2 - t.get_width() // 2 - 16
+        by = H // 2 - t.get_height() // 2 - 10
+        bw = t.get_width() + 32
+        bh = t.get_height() + 20
+        pygame.draw.rect(screen, C_BG,     (bx, by, bw, bh), border_radius=8)
+        pygame.draw.rect(screen, C_BORDER, (bx, by, bw, bh), 1, border_radius=8)
+        screen.blit(t, (W // 2 - t.get_width() // 2, H // 2 - t.get_height() // 2))
+        pygame.display.flip()
+        clock.tick(30)
+
+
 # ── Public: save agents on shutdown ───────────────────────────────────────────
 
 def save_agents(sessions, session_mode: str) -> list[str]:
@@ -402,3 +642,46 @@ def save_agents(sessions, session_mode: str) -> list[str]:
 def save_best_agent(sessions, session_mode: str) -> str | None:
     saved = save_agents(sessions, session_mode)
     return saved[0] if saved else None
+
+
+# ── Checkpoint migration helper ───────────────────────────────────────────────
+
+def migrate_v1_checkpoints():
+    """
+    One-time utility: converts any v1 (raw state_dict) .pt files in
+    saved_agents/ to v2 format so they load with correct epsilon.
+
+    Because v1 files don't store epsilon, we can't recover the original value —
+    but we mark them as version 2 with epsilon=None so at least the load path
+    doesn't silently override epsilon to 0.05.
+
+    Run once from a Python shell:
+        from agent_selector import migrate_v1_checkpoints
+        migrate_v1_checkpoints()
+    """
+    import torch
+    files = glob.glob(os.path.join(AGENTS_DIR, "*.pt"))
+    migrated = 0
+    for fpath in files:
+        try:
+            raw = torch.load(fpath, map_location="cpu", weights_only=False)
+        except Exception as e:
+            print(f"[migrate] Could not load {fpath}: {e}")
+            continue
+
+        if isinstance(raw, dict) and "state_dict" in raw:
+            continue  # already v2
+
+        # v1 — raw OrderedDict of weights
+        print(f"[migrate] upgrading v1 → v2: {os.path.basename(fpath)}")
+        checkpoint = {
+            "version":    2,
+            "state_dict": raw,
+            "epsilon":    None,   # unknown — was not saved
+            "tick":       0,
+            "migrated":   True,
+        }
+        torch.save(checkpoint, fpath)
+        migrated += 1
+
+    print(f"[migrate] done — {migrated} file(s) upgraded.")
