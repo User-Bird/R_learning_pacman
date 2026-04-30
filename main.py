@@ -1,9 +1,9 @@
 """
-main.py  ─  Phase 4: Main Entry Point (Updated)
-──────────────────────────────────────────────────
+main.py  ─  Phase 5: Main Entry Point (Updated with Reward Curves)
+──────────────────────────────────────────────────────────────────
 Implements the 3-button logic (WATCH, FAST, HEADLESS).
 Decouples the stats rendering to a separate process via stats_io.py.
-Includes Agent Selection UI and Auto-saving on Quit.
+Includes Agent Selection UI, Auto-saving on Quit, and Live Reward Tracking.
 """
 
 import pygame
@@ -16,14 +16,12 @@ from agent import DQNAgent
 from rl.trainer import Trainer
 from renderer import draw_game
 
-# ── NEW IMPORTS ────────────────────────────────────────────────────────────────
 from stats_io import write_stats, write_shutdown, clear_stats
 from agent_selector import (
     show_session_mode_picker,
     save_agents,
-    show_save_and_close_dialog,   # ← new
+    show_save_and_close_dialog,
 )
-
 
 # ── Session Wrapper ────────────────────────────────────────────────────────────
 
@@ -37,18 +35,22 @@ class Session:
         self.trainer1 = Trainer()
         self.trainer2 = Trainer()
 
-        # Initialize tracking vars before loading so we can overwrite them if needed
+        # Initialize tracking vars
         self.episodes = 0
         self.wins_p1 = 0
         self.wins_p2 = 0
         self.ticks = 0
 
+        # Reward tracking for live curves
+        self.ep_reward_p1 = 0.0
+        self.ep_reward_p2 = 0.0
+        self.last_ep_reward_p1 = 0.0
+        self.last_ep_reward_p2 = 0.0
+
         # ── LOAD SAVED AGENTS LOGIC ───────────────────────────────────────────
         if session_mode == "NEW_VS_AGENT" and agent2_path:
             ckpt = self.trainer2.load_checkpoint(agent2_path)
             if ckpt:
-                # Restore episode and win counts so the display picks up from
-                # where the agent left off instead of showing 0 every time.
                 self.episodes = ckpt.get("episodes", 0)
                 self.wins_p2  = ckpt.get("wins",     0)
 
@@ -71,6 +73,7 @@ class Session:
         self.states = self.game.reset()
 
     def step(self):
+        """Returns True if the episode ended on this step, False otherwise."""
         s1, s2 = self.states
 
         # Get actions
@@ -80,6 +83,10 @@ class Session:
         # Advance game
         next_states, rewards, done = self.game.step([a1, a2])
         self.ticks += 1
+
+        # Accumulate rewards for this episode
+        self.ep_reward_p1 += rewards[0]
+        self.ep_reward_p2 += rewards[1]
 
         # Push experience to buffers
         self.agent1.push(s1, a1, rewards[0], next_states[0], done)
@@ -95,8 +102,17 @@ class Session:
             self.agent1.on_episode_end()
             self.agent2.on_episode_end()
             self.states = self.game.reset()
+
+            # Save final episode rewards for plotting, then reset accumulators
+            self.last_ep_reward_p1 = self.ep_reward_p1
+            self.last_ep_reward_p2 = self.ep_reward_p2
+            self.ep_reward_p1 = 0.0
+            self.ep_reward_p2 = 0.0
+
+            return True
         else:
             self.states = next_states
+            return False
 
 # ── Render Helpers ─────────────────────────────────────────────────────────────
 
@@ -195,10 +211,10 @@ def main():
     rect_headless = pygame.Rect(bx_start + 2 * (bw + 20), by, bw, bh)
     btn_rects = [rect_watch, rect_fast, rect_headless]
 
-    # ── Save & Close button geometry ──────────────────────────────────────────
+    # ── Save & Close button geometry
     BTN_SC_W, BTN_SC_H = 160, 40
     btn_save_close = pygame.Rect(
-        W - BTN_SC_W - 20,  # Positioned at the bottom right corner
+        W - BTN_SC_W - 20,
         by,
         BTN_SC_W,
         BTN_SC_H,
@@ -215,13 +231,17 @@ def main():
     measured_fps = 0.0
     frame_count = 0
 
+    # ── Reward History for Live Charts
+    reward_history = {"p1": [], "p2": []}
+    HISTORY_MAX_LEN = 1500  # Prevent memory leak over extremely long runs
+
     C_BG = (10, 12, 16)
 
     running = True
     while running:
         mouse_pos = pygame.mouse.get_pos()
 
-        # 1. Events (always poll every frame, even in headless!)
+        # 1. Events
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -232,17 +252,42 @@ def main():
                 elif rect_fast.collidepoint(event.pos): current_mode = "FAST"
                 elif rect_headless.collidepoint(event.pos): current_mode = "HEADLESS"
                 elif btn_save_close.collidepoint(event.pos):
-                    # Open the named-save dialog. It blocks until user saves or cancels.
                     saved = show_save_and_close_dialog(screen, fonts, sessions, session_mode)
                     if saved:
-                        print(f"[main] saved as: {saved}")
-                        running = False   # close the window after a successful save
+                        print(f"[main] saved: {saved}")
+                        running = False
 
         # 2. Step Games
         n_ticks = {"WATCH": 1, "FAST": 50, "HEADLESS": 200}[current_mode]
         for _ in range(n_ticks):
             for s in sessions:
-                s.step()
+                episode_ended = s.step()
+
+                # If an episode just ended, record stats for the charts
+                if episode_ended:
+                    for pid, key in ((1, "p1"), (2, "p2")):
+                        best_ep    = -1
+                        best_wr    = -1.0
+                        best_avg_r = 0.0
+
+                        # Find the best agent right now
+                        for sess in sessions:
+                            if sess.episodes == 0:
+                                continue
+                            wins = sess.wins_p1 if pid == 1 else sess.wins_p2
+                            wr   = wins / sess.episodes
+                            avg_r = sess.last_ep_reward_p1 if pid == 1 else sess.last_ep_reward_p2
+
+                            if wr > best_wr or (wr == best_wr and best_ep < sess.episodes):
+                                best_wr    = wr
+                                best_avg_r = avg_r
+                                best_ep    = sess.episodes
+
+                        if best_ep > 0:
+                            reward_history[key].append([best_ep, best_avg_r, best_wr])
+                            if len(reward_history[key]) > HISTORY_MAX_LEN:
+                                reward_history[key].pop(0)
+
         tick_count_window += n_ticks
 
         # 3. Render
@@ -286,7 +331,8 @@ def main():
                 mode=current_mode,
                 tps=measured_tps,
                 fps=measured_fps,
-                session_mode=session_mode
+                session_mode=session_mode,
+                reward_history=reward_history  # <--- Added to pass data to stats window
             )
             last_stats_write = now
 
@@ -294,13 +340,13 @@ def main():
         frame_count += 1
 
     # ── SHUTDOWN LOGIC ─────────────────────────────────────────────────────────
-    write_shutdown()  # Tell stats_window to close
+    write_shutdown()
     saved = save_agents(sessions, session_mode)
     for f in saved:
-        print(f"Saved: {f}")
+        print(f"Saved fallback: {f}")
 
     pygame.quit()
-    stats_proc.wait(timeout=3)  # Wait for stats_window to gracefully exit
+    stats_proc.wait(timeout=3)
     sys.exit(0)
 
 if __name__ == "__main__":

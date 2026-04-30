@@ -12,6 +12,17 @@ STALE_AFTER seconds, main.py is considered dead and the window shows "Offline".
 
 Shutdown: main.py writes {"shutdown": true} before exiting so stats_window
 can close itself cleanly instead of waiting for the file to go stale.
+
+Reward curves
+─────────────
+write_stats() now accepts an optional reward_history dict:
+  {
+    "p1": [(episode, avg_reward, win_rate), ...],   # history for best P1
+    "p2": [(episode, avg_reward, win_rate), ...],   # history for best P2
+  }
+This is written into the JSON under "curves" and read back by stats_window
+to draw the live reward / win-rate charts.  The history is accumulated by
+main.py (not here) — this module just serialises and deserialises it.
 """
 
 import json
@@ -24,17 +35,21 @@ STALE_AFTER = 3.0   # seconds — if data is older than this, main.py is dead
 
 
 def write_stats(sessions, mode: str, tps: float, fps: float,
-                session_mode: str = "NEW_VS_NEW"):
+                session_mode: str = "NEW_VS_NEW",
+                reward_history: dict | None = None):
     """
     Called by main.py every ~0.1 s.
 
-    session_mode:  "NEW_VS_NEW" | "NEW_VS_AGENT" | "AGENT_VS_AGENT"
+    session_mode   : "NEW_VS_NEW" | "NEW_VS_AGENT" | "AGENT_VS_AGENT"
+    reward_history : optional dict with keys "p1" and "p2", each a list of
+                     (episode, avg_reward, win_rate) tuples for the best
+                     agent on that side across all sessions.
     """
     data = {
         "ts":           time.time(),
         "shutdown":     False,
         "mode":         mode,           # WATCH / FAST / HEADLESS
-        "session_mode": session_mode,   # NEW_VS_NEW / NEW_VS_AGENT / AGENT_VS_AGENT
+        "session_mode": session_mode,
         "tps":          tps,
         "fps":          fps,
         "games": [
@@ -53,6 +68,8 @@ def write_stats(sessions, mode: str, tps: float, fps: float,
             }
             for s in sessions
         ],
+        # Reward/win-rate curves — empty dicts if not provided
+        "curves": reward_history or {"p1": [], "p2": []},
     }
     _atomic_write(data)
 

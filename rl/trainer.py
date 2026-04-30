@@ -47,6 +47,13 @@ class Trainer:
         self._tick     = 0
         self.last_loss = 0.0
 
+        # ── Epsilon floor tracking ────────────────────────────────────────────
+        # Logged once when epsilon first hits the floor so you can see how many
+        # episodes it took.  Reset to False on load_checkpoint so resuming a
+        # session that already hit the floor doesn't log a spurious message.
+        self._epsilon_floor_logged = False
+        self.episodes = 0   # incremented by on_episode_end(); used for the log
+
     # ── Checkpoint save / load ────────────────────────────────────────────────
 
     def save_checkpoint(self, path: str, extra_info: dict = None):
@@ -62,6 +69,7 @@ class Trainer:
             "state_dict": self.online_net.state_dict(),
             "epsilon":    self.epsilon,
             "tick":       self._tick,
+            "episodes":   self.episodes,
         }
         if extra_info:
             checkpoint.update(extra_info)
@@ -81,8 +89,12 @@ class Trainer:
         if isinstance(raw, dict) and "state_dict" in raw:
             # ── v2: full checkpoint ───────────────────────────────────────────
             self.online_net.load_state_dict(raw["state_dict"])
-            self.epsilon = raw.get("epsilon", EPSILON_END)
-            self._tick   = raw.get("tick",    0)
+            self.epsilon  = raw.get("epsilon", EPSILON_END)
+            self._tick    = raw.get("tick",    0)
+            self.episodes = raw.get("episodes", 0)
+            # Re-arm the floor log: if the loaded epsilon is already at the
+            # floor we don't want to log again, so mark it as already done.
+            self._epsilon_floor_logged = (self.epsilon <= EPSILON_END)
             print(f"[trainer] loaded v2 checkpoint from {path}  "
                   f"(ε={self.epsilon:.4f}, tick={self._tick:,}, "
                   f"ep={raw.get('episodes', '?')})")
@@ -91,6 +103,7 @@ class Trainer:
             # ── v1: just weights (backward compat) ───────────────────────────
             self.online_net.load_state_dict(raw)
             self.epsilon = EPSILON_END    # safe exploitation default
+            self._epsilon_floor_logged = True   # already at floor
             print(f"[trainer] loaded v1 weights from {path}  (ε set to {EPSILON_END})")
             return {}
 
@@ -141,7 +154,19 @@ class Trainer:
             self.target_net.load_state_dict(self.online_net.state_dict())
 
     def on_episode_end(self):
+        self.episodes += 1
+        prev_epsilon = self.epsilon
         self.epsilon = max(EPSILON_END, self.epsilon * EPSILON_DECAY)
+
+        # Log once when epsilon first hits the floor
+        if (prev_epsilon > EPSILON_END
+                and self.epsilon <= EPSILON_END
+                and not self._epsilon_floor_logged):
+            self._epsilon_floor_logged = True
+            print(
+                f"[trainer] ε hit floor ({EPSILON_END}) after "
+                f"{self.episodes:,} episodes  (tick={self._tick:,})"
+            )
 
     def _train_step(self):
         states, actions, rewards, next_states, dones = \

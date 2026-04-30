@@ -8,15 +8,16 @@ Provides:
   save_agents(sessions, session_mode)  →  list of saved filenames
 
   show_save_and_close_dialog(screen, fonts, sessions, session_mode)
-      →  saved filename (str) | None if cancelled
-      Shows a named-save dialog for the best P2 agent, displaying
-      current ε, wins, and episodes next to the name input field.
+      →  list[str]  (saved filenames, 0-2 items)
+      Shows a named-save dialog for each agent that should be saved, one at a
+      time (P1 then P2 where applicable). Displays current ε, wins, and
+      episodes next to the name input field.
 
 What gets saved per mode
 ────────────────────────
-  NEW_VS_NEW     → best agent across all 6 games (1 file)
-  NEW_VS_AGENT   → best P1 (agentB / new challenger)  +  best P2 (agentAA / battle-hardened)
-  AGENT_VS_AGENT → best P1 (agentAAA lineage)         +  best P2 (agentBB lineage)
+  NEW_VS_NEW     → best P1 + best P2 (2 files — one dialog per player)
+  NEW_VS_AGENT   → best P1 (new challenger) + best P2 (battle-hardened)
+  AGENT_VS_AGENT → best P1 (agentAAA lineage) + best P2 (agentBB lineage)
 
 Each .pt file is a full checkpoint dict:
   version, state_dict, epsilon, tick, episodes, win_rate, player, session_mode, saved_at
@@ -371,50 +372,41 @@ def _save_with_name(trainer, ep: int, wins: int, wr: float,
     return fname
 
 
-# ── NEW: Save & Close dialog ──────────────────────────────────────────────────
+# ── Internal: single-player named-save dialog ─────────────────────────────────
 
-def show_save_and_close_dialog(screen, fonts, sessions, session_mode: str) -> str | None:
+def _show_save_dialog_for_player(screen, fonts, sessions, session_mode: str,
+                                  player_id: int) -> str | None:
     """
-    Show a modal dialog that lets the user name and save the best P2 agent,
-    displaying its current ε, wins, and episode count right next to the input.
+    Shows the naming dialog for one player's best agent.
 
-    Call this when the "Save & Close" button is pressed in main.py.
-    After it returns, set running = False to exit the main loop.
-
-    Returns
-    -------
-    str   – saved filename (basename only) on success
-    None  – if the user cancelled or there were no episodes to save
+    Returns the saved filename (basename) on success, or None if the user
+    cancelled or there were no episodes played for this player.
     """
     font_md, font_sm, font_xs = fonts
     W, H = screen.get_size()
 
-    # ── Find best P2 ──────────────────────────────────────────────────────────
-    result = _find_best(sessions, 2)
+    # ── Find best for this player ─────────────────────────────────────────────
+    result = _find_best(sessions, player_id)
     if result is None:
-        # No episodes at all — show a brief "nothing to save" notice
-        _show_notice(screen, fonts, "No episodes played yet — nothing to save.")
+        _show_notice(screen, fonts, f"No episodes for P{player_id} — skipping.")
         return None
 
     _, trainer, ep, wins, wr = result
     eps = trainer.epsilon
 
-    # ── Layout ───────────────────────────────────────────────────────────────
+    # ── Layout ────────────────────────────────────────────────────────────────
     DW, DH = 480, 290
     dx = (W - DW) // 2
     dy = (H - DH) // 2
     dlg = pygame.Rect(dx, dy, DW, DH)
 
-    # Stats block sits in the upper portion
-    stats_top = dy + 50
-
-    # Name input below stats
+    stats_top  = dy + 50
     label_y    = stats_top + 100
     input_rect = pygame.Rect(dx + 14, label_y + 22, DW - 28, 36)
 
-    btn_save   = pygame.Rect(dx + 14,              dy + DH - 50,
+    btn_save   = pygame.Rect(dx + 14,             dy + DH - 50,
                              (DW - 42) // 2, 34)
-    btn_cancel = pygame.Rect(btn_save.right + 14,  dy + DH - 50,
+    btn_cancel = pygame.Rect(btn_save.right + 14, dy + DH - 50,
                              (DW - 42) // 2, 34)
 
     # ── State ─────────────────────────────────────────────────────────────────
@@ -423,7 +415,7 @@ def show_save_and_close_dialog(screen, fonts, sessions, session_mode: str) -> st
     clock     = pygame.time.Clock()
 
     while True:
-        mouse = pygame.mouse.get_pos()
+        mouse    = pygame.mouse.get_pos()
         can_save = bool(user_text.strip())
 
         for event in pygame.event.get():
@@ -436,7 +428,7 @@ def show_save_and_close_dialog(screen, fonts, sessions, session_mode: str) -> st
 
                 elif event.key == pygame.K_RETURN and can_save:
                     return _save_with_name(
-                        trainer, ep, wins, wr, 2, session_mode,
+                        trainer, ep, wins, wr, player_id, session_mode,
                         user_text.strip()
                     )
 
@@ -445,7 +437,6 @@ def show_save_and_close_dialog(screen, fonts, sessions, session_mode: str) -> st
 
                 elif len(user_text) < MAX_LEN:
                     ch = event.unicode
-                    # Accept letters, digits, spaces, hyphens
                     if ch and (ch.isalnum() or ch in " -_"):
                         user_text += ch
 
@@ -454,7 +445,7 @@ def show_save_and_close_dialog(screen, fonts, sessions, session_mode: str) -> st
                     return None
                 if btn_save.collidepoint(mouse) and can_save:
                     return _save_with_name(
-                        trainer, ep, wins, wr, 2, session_mode,
+                        trainer, ep, wins, wr, player_id, session_mode,
                         user_text.strip()
                     )
 
@@ -467,7 +458,7 @@ def show_save_and_close_dialog(screen, fonts, sessions, session_mode: str) -> st
         pygame.draw.rect(screen, C_BORDER, dlg, 1, border_radius=10)
 
         # Title
-        ttl = font_md.render("SAVE BEST P2 AGENT", True, C_TEXT_PRI)
+        ttl = font_md.render(f"SAVE BEST P{player_id} AGENT", True, C_TEXT_PRI)
         screen.blit(ttl, (dlg.centerx - ttl.get_width() // 2, dy + 14))
 
         # Divider
@@ -475,7 +466,6 @@ def show_save_and_close_dialog(screen, fonts, sessions, session_mode: str) -> st
                          (dx + 14, dy + 38), (dx + DW - 14, dy + 38), 1)
 
         # ── Stats block ───────────────────────────────────────────────────────
-        # Labels on the left, values on the right in a neat two-column layout
         col_label = dx + 24
         col_value = dx + 160
         sy = stats_top
@@ -488,41 +478,36 @@ def show_save_and_close_dialog(screen, fonts, sessions, session_mode: str) -> st
             screen.blit(tv, (col_value, sy - 1))
             sy += tl.get_height() + 8
 
-        # Epsilon colour: green = still learning, yellow = near floor
         eps_col = C_STAT_GOOD if eps > 0.15 else C_STAT_WARN
         wr_col  = C_STAT_GOOD if wr >= 0.5  else C_STAT_WARN
 
-        _stat_row("Episodes played:",  f"{ep:,}")
-        _stat_row("Wins (P2):",        f"{wins:,}  ({wr:.1%})",  wr_col)
-        _stat_row("Current  ε:",       f"{eps:.4f}",             eps_col)
-        _stat_row("Tick count:",       f"{trainer._tick:,}")
+        _stat_row("Episodes played:",    f"{ep:,}")
+        _stat_row(f"Wins (P{player_id}):", f"{wins:,}  ({wr:.1%})", wr_col)
+        _stat_row("Current  ε:",         f"{eps:.4f}",              eps_col)
+        _stat_row("Tick count:",         f"{trainer._tick:,}")
 
         # ── Name input ────────────────────────────────────────────────────────
         lbl = font_xs.render("Name for this agent:", True, C_TEXT_SEC)
         screen.blit(lbl, (dx + 14, label_y))
 
-        # Input box
-        border_col = C_SELECT   # always active (only input in dialog)
         pygame.draw.rect(screen, C_PANEL_BG, input_rect, border_radius=5)
-        pygame.draw.rect(screen, border_col, input_rect, 1, border_radius=5)
+        pygame.draw.rect(screen, C_SELECT,   input_rect, 1, border_radius=5)
 
-        cursor = "|" if (pygame.time.get_ticks() // 500) % 2 == 0 else " "
-        display_text = user_text + cursor
-        txt_surf = font_sm.render(display_text, True, C_TEXT_PRI)
+        cursor       = "|" if (pygame.time.get_ticks() // 500) % 2 == 0 else " "
+        txt_surf     = font_sm.render(user_text + cursor, True, C_TEXT_PRI)
         screen.blit(txt_surf,
                     (input_rect.left + 8,
                      input_rect.centery - txt_surf.get_height() // 2))
 
-        # Character counter
         cc = font_xs.render(f"{len(user_text)}/{MAX_LEN}", True, C_TEXT_DIM)
         screen.blit(cc, (input_rect.right - cc.get_width() - 6,
                          input_rect.bottom + 3))
 
-        # Preview of what the filename will look like
+        # Filename preview
         if user_text.strip():
             safe = "".join(c if c.isalnum() or c in "-_" else "_"
                            for c in user_text.strip())[:32]
-            preview = f"→ {safe}_p2_ep{ep}_e{eps:.3f}_w{wins}.pt"
+            preview = f"→ {safe}_p{player_id}_ep{ep}_e{eps:.3f}_w{wins}.pt"
         else:
             preview = "→ enter a name above"
         pv = font_xs.render(preview, True, C_TEXT_DIM)
@@ -567,68 +552,59 @@ def _show_notice(screen, fonts, message: str, duration_ms: int = 2000):
         clock.tick(30)
 
 
+# ── Public: Save & Close dialog ───────────────────────────────────────────────
+
+def show_save_and_close_dialog(screen, fonts, sessions,
+                                session_mode: str) -> list[str]:
+    """
+    Show a named-save dialog for each agent that should be saved, one at a
+    time (P1 first, then P2).  All modes now save both players.
+
+    Call this when the "Save & Close" button is pressed in main.py.
+    After it returns, set running = False to exit the main loop.
+
+    Returns
+    -------
+    list[str]  – saved filenames (0-2 items depending on how many had episodes
+                 and how many the user confirmed rather than cancelling)
+    """
+    saved = []
+    for player_id in (1, 2):
+        fname = _show_save_dialog_for_player(
+            screen, fonts, sessions, session_mode, player_id
+        )
+        if fname:
+            saved.append(fname)
+    return saved
+
+
 # ── Public: save agents on shutdown ───────────────────────────────────────────
 
 def save_agents(sessions, session_mode: str) -> list[str]:
     """
-    Called by main.py after the main loop ends.
+    Called by main.py after the main loop ends (fallback auto-save path).
 
-    What gets saved depends on the session mode:
-
-      NEW_VS_NEW
-        → 1 file: best agent across all 12 agents (both P1 and P2)
-
-      NEW_VS_AGENT
-        → 2 files:
-            best P1  (the new challenger — what you'd call agentB)
-            best P2  (the battle-hardened loaded agent — what you'd call agentAA)
-
-      AGENT_VS_AGENT
-        → 2 files:
-            best P1  (agentAAA lineage)
-            best P2  (agentBB  lineage)
+    All modes save the best agent for each side independently (P1 + P2),
+    keeping behaviour consistent with show_save_and_close_dialog.
 
     Each .pt file is a FULL checkpoint (weights + epsilon + tick + metadata).
-    Returns a list of saved filenames (1 or 2 items, or [] if nothing played).
+    Returns a list of saved filenames (0-2 items).
     """
     label_map = {
         "NEW_VS_NEW":     "newnew",
         "NEW_VS_AGENT":   "nva",
         "AGENT_VS_AGENT": "ava",
     }
-    tag = label_map.get(session_mode, "unknown")
+    tag   = label_map.get(session_mode, "unknown")
     saved = []
 
-    if session_mode == "NEW_VS_NEW":
-        # ── single best agent across all 12 slots ────────────────────────────
-        best_overall = None
-        best_wr      = -1.0
-
-        for pid in (1, 2):
-            result = _find_best(sessions, pid)
-            if result is None:
-                continue
-            _, trainer, ep, wins, wr = result
-            if wr > best_wr or (wr == best_wr and
-                    best_overall is not None and
-                    trainer.epsilon < best_overall[0].epsilon):
-                best_overall = (trainer, ep, wins, wr, pid)
-                best_wr = wr
-
-        if best_overall:
-            trainer, ep, wins, wr, pid = best_overall
-            fname = _save_one(trainer, ep, wins, wr, pid, session_mode, tag)
-            saved.append(fname)
-
-    elif session_mode in ("NEW_VS_AGENT", "AGENT_VS_AGENT"):
-        # ── save best for each side independently ─────────────────────────────
-        for pid in (1, 2):
-            result = _find_best(sessions, pid)
-            if result is None:
-                continue
-            _, trainer, ep, wins, wr = result
-            fname = _save_one(trainer, ep, wins, wr, pid, session_mode, tag)
-            saved.append(fname)
+    for pid in (1, 2):
+        result = _find_best(sessions, pid)
+        if result is None:
+            continue
+        _, trainer, ep, wins, wr = result
+        fname = _save_one(trainer, ep, wins, wr, pid, session_mode, tag)
+        saved.append(fname)
 
     if not saved:
         print("[save] No episodes played — nothing saved.")
